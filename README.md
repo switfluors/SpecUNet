@@ -53,7 +53,7 @@ This code base demonstrates how to:
 
 ## Acknowledgments
 
-We used the following papers for our implementation, cited using BibTeX:
+We gratefully acknowledge the following foundational work, which informed our implementation. The BibTeX entry below cites the referenced paper:
 
 **U-Net: Convolutional Networks for Biomedical Image Segmentation**
 
