@@ -5,15 +5,8 @@ This repository contains the MATLAB code and sample data used in the manuscript 
 ## Table of Contents
 - [Overview](#overview)
 - [Repository Contents](#repository-contents)
-- [Getting Started](#getting-started)
-- [Usage](#usage)
-  - [1. DataSimulation](#1-datasimulation)
-  - [2. Network Training](#2-network-training)
-  - [3. Evaluation](#3-evaluation)
-  - [4. Additional Scripts](#4-additional-scripts)
-- [Data](#data)
+- [MATLAB Version and Tool box](#MATLAB-Version-and-Tool-box)
 - [Citation](#citation)
-- [License](#license)
 
 ## Overview
 This code base demonstrates how to:
