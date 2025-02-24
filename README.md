@@ -67,6 +67,7 @@ This code base demonstrates how to:
 In MATLAB, navigate to the cloned folder and add it to your path:
   ```bash
   addpath(genpath('SpecUNet'));
+  ```
 
 ## Acknowledgments
 
