@@ -52,22 +52,11 @@ This code base demonstrates how to:
 - **README.md**  
   This file.
 
-## Getting Started
-1. **MATLAB Version**  
+ ## MATLAB Version and Tool box
    The code was developed and tested in MATLAB R2024a. Make sure you have the required toolboxes:
    - Deep Learning Toolbox
    - (Optionally) Parallel Computing Toolbox if you want to run on a GPU
 
-2. **Cloning the Repository**  
-   ```bash
-   git clone https://github.com/your-username/SpecUNet.git
-   cd SpecUNet
-
-3. **Add the Folder to MATLAB Path**
-In MATLAB, navigate to the cloned folder and add it to your path:
-  ```bash
-  addpath(genpath('SpecUNet'));
-  ```
 
 ## Acknowledgments
 
