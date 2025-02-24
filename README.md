@@ -4,7 +4,7 @@ This repository contains the MATLAB code and sample data used in the manuscript 
 
 ## Table of Contents
 - [Overview](#overview)
-- [Repository Contents](#repository-contents)
+- [Repository Contents and Usage](#repository-contents)
 - [MATLAB Version and Tool box](#MATLAB-Version-and-Tool-box)
 - [Citation](#citation)
 
@@ -14,7 +14,7 @@ This code base demonstrates how to:
 2. Train the **SpecUNet** model in MATLAB using the provided sample data.
 3. Evaluate the trained model on independent test data.
 
-## Repository Contents
+## Repository Contents and Usage
 - **DataSimulation.m**  
   Script for simulating and preprocessing data before training.
   **Note**: If generating training data, please set `Numspectra = 100,000` to ensure consistency with model expectations.
