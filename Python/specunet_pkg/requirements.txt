@@ -1,0 +1,18 @@
+numpy
+matplotlib
+h5py
+hdf5storage
+pillow
+scipy
+tqdm
+onnx
+onnxscript
+pandas
+openpyxl
+scikit-image
+setuptools
+
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch
+torchaudio
+torchvision
