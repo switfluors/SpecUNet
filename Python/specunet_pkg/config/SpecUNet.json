@@ -26,15 +26,15 @@
         "data_type": {
             "type": "spectral",
             "norm": true,
-            "input_name": "normalized_sptimgPerlin",
-            "target_name": "normalized_tbgPerlin",
-            "GTspt": "normalized_GTspt",
+            "input_name": "sptimg4",
+            "target_name": "tbg4",
+            "GTspt": "GTspt",
             "spt": "spt",
             "seed": 42
         },
         "train": {
             "args": {
-                "data_root": "D:\\DrZhang_Research\\Codebases\\UNet Research\\Python\\SpecUNet\\Python\\data\\spectral_data\\simulated_data\\Training_Perlin40k_Pperlin50k_MatchNorm.mat",
+                "data_root": "data/Sample_TrainingData_10000.mat",
                 "data_len": 0,
                 "percent": false
             },
@@ -56,7 +56,7 @@
         },
         "test_sim": {
             "args": {
-                "data_root": "D:\\DrZhang_Research\\Codebases\\UNet Research\\Python\\SpecUNet\\Python\\data\\spectral_data\\simulated_data\\Testing_Perlin5k_Pperlin50k_MatchNorm.mat",
+                "data_root": "data/TestingData.mat",
                 "data_len": 0
             },
             "dataloader": {
@@ -70,7 +70,7 @@
         },
         "test_exp": {
             "args": {
-                "data_root": "D:\\DrZhang_Research\\Codebases\\UNet Research\\Python\\SpecUNet\\Python\\data\\spectral_data\\experimental_data\\normalized_003_t1510.mat",
+                "data_root": "data/ExpTestingData.mat",
                 "data_len": 0
             },
             "dataloader": {
@@ -111,9 +111,8 @@
 
         "metrics": {
             "image_wise": ["RMSE", "PSNR", "SSIM"],
+            "localization_wise": [],
             "spectral_wise": ["Spearman rho", "Pearson r", "Centroid GT (nm)", "Centroid Raw (nm)", "Centroid % Error"],
-            "localization_wise": ["Jaccard Index", "Localization Recall", "Localization Precision", "Localization F1-Score", "Localization Accuracy (RMSE)"],
-            "spatial_wise": ["Cramer-Rao Lower Bound", "Fourier Ring Correlation"],
             "summary_output": ["mean_centroid_rawspt", "std_centroid_rawspt", "mean_centroid_spef", "std_centroid_spef"]
         }
     }

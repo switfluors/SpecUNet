@@ -1,9 +1,8 @@
-# Python Implementation of Conventional UNet for Single-Molecule Microscopy Spectral Image Denoising
-
-This project implements a deep learning model implementing a traditional UNet architecture for processing spectral images.
-The goal is to predict the background (and thereby) the spectra information using simulated Perlin and Gaussian noise spectral images.
-Our project implementation is highly configurable, as it supports training/testing with the same or different
-datasets, changing hyperparameters, and more.
+# SpecUNet Implementation for Spectroscopic Single-molecule Localization Microscopy(sSMLM) Imaging Denoising
+This project implements a deep learning model with a U-Net-based architecture for processing single-molecule spectral localization microscopy (sSMLM) images. 
+The goal is to predict background signals and produce denoised spectral images that preserve useful spectral information for downstream analysis. 
+Implementation is highly configurable, supporting different training and testing datasets, adjustable hyperparameters, and reproducible evaluation workflows.
+> Reference: Mao, H. et al. “Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning,” *Analytical Chemistry* (2025). :contentReference[oaicite:4]{index=4}
 
 ## Table of Contents
 1. [Project Structure](#project-structure)
@@ -38,15 +37,10 @@ datasets, changing hyperparameters, and more.
 ├── specunet_pkg.egg-info    # Stores build metadata (not included in repo)
 └── setup.cfg                   # Package setup configuration
 ```
-## Models
 
-Currently, the following models have been added for training/testing to this repository:
+### SpecUNet Architecture 
 
-- Conventional UNet
-
-### Conventional UNet
-
-The conventional UNet structure takes a given image with dimensions of `16x128` and applies the following transformations:
+The SpecUNet structure takes a given image with dimensions of `16x128` and applies the following transformations:
 1. 4 Downsampling Blocks (Encoder)
 
 Within each downsampling block consists the following:
@@ -111,7 +105,7 @@ If you want to modify the source code, run the hyperparameter search, or build t
 
 ```Bash
 git clone https://github.com/switfluors/SpecUNet.git
-cd SpecUNet/Python
+cd .\Python
 ```
 
 2. Create a virtual environment (Optional but highly recommended):
@@ -128,7 +122,7 @@ source venv/bin/activate
 3. Install dependencies:
 
 ```Bash
-pip install -r requirements.txt
+pip install -r specunet_pkg/requirements.txt
 ```
 ⚠️ Note regarding PyTorch: Currently, the requirements.txt is configured for CUDA 12.8. If your machine uses a different GPU architecture or if you are running on CPU only, this may fail or run slowly. Please adjust the PyTorch installation command according to your system specs via the official PyTorch documentation.
 
@@ -219,9 +213,9 @@ Supported flags used to train and test a model:
 * `--num_workers` - Number of workers to load data into the GPU
 * `--input_name` - Variable that stores the input (sptimg) data
 * `--target_name` - Variable that stores the target (tbg) data
-* `--GTspt` - Variable for ground truth spectral data
-* `--spt` - Spectral channels data (provide if available for simulated/experimental data)
-* `--model_type` - Model that you want to train/test (supported is "unet" - Conventional UNet, "all" - both models)
+* `--GTspt` - Variable for ground truth spectra image data
+* `--spt` - 1D spectrum profile for each spectra image (provide if available for simulated/experimental data)
+* `--model_type` - Model that you want to train/test (currently, only "unet" is supported)
 * `--epochs` - Number of epochs used for training
 * `--bs` - Batch size
 * `--lr` - Learning rate
@@ -270,46 +264,46 @@ input, target, and ground spectral data (if applicable) use consistent variable 
 An example of running a model to train and test is shown below.
 
 #### Example
-As an example, we would like to train the conventional UNet network on the 
-`Training_Perlin40k_Pperlin50k_MatchNorm.mat` dataset and test on the simulated
-`Testing_Perlin5k_Pperlin50k_MatchNorm.mat` dataset with normalized input variable `normalized_sptimgPerlin`, 
-target variable `normalized_tbgPerlin`, and ground truth spectral image variable `normalized_GTspt` that are stored 
-in the `data` folder with a learning rate of 0.001, L2-regularization factor of 0.0005, and loss function of MAE. 
-Moreover, you would like to store the trained model with an experiment name of `Model_Test`.
+As an example, we would like to train SpecUNet on the `Sample_TrainingData_10000.mat` dataset and test on the simulated `TestingData.mat` dataset, 
+target variable `tbg4`, and ground truth spectral image variable `GTspt` that are stored  in the `data` folder with a learning rate of 0.001, 
+L2-regularization factor of 0.0005, and loss function of MAE. 
+Moreover, you would like to store the trained model with an experiment name of `Trained_Model1`.
 
 In this case, the command will be as simple as:
 
 ```bash
-python -m specunet_pkg main.py --train --test_sim --exp_name "Model_Test" --model_type "unet" --train_path "data/Training_Perlin40k_Pperlin50k_MatchNorm.mat" --train_size 80000 --test_path "../data/Testing_Perlin5k_Pperlin50k_MatchNorm.mat" --test_size 5000 --input_name "normalized_sptimgPerlin" --target_name "normalized_tbgPerlin" --GTspt "normalized_GTspt" --lr 0.001 --weight_decay 0.0005 --loss_fn "mae"
+python -m specunet_pkg --train --test_sim --exp_name "Trained_Model1" --model_type "unet" --train_path "data/Sample_TrainingData_10000.mat" --train_size 10000 --test_path "data/TestingData.mat" --test_size 5000 --input_name "sptimg4" --target_name "tbg4" --GTspt "GTspt" --lr 0.001 --weight_decay 0.0005 --loss_fn "mae"
 ```
 
 Alternatively, you can use a configuration file to define the same training and testing parameters, as long as it is defined by your expectations:
 
 ```bash
-python -m specunet_pkg --train --test_sim --exp_name "Model_Test" --config "config/SpecUNet.json"
+python -m specunet_pkg --train --test_sim --exp_name "Trained_Model1" --config "config/SpecUNet.json"
 ```
 
-If you would like to then test this model on an experimental dataset called `Testing_Normalized_B4_001.mat` with 100
-samples and target variable of `sptimg4`, you would run the following command:
+If you would like to only test selected model under "Trained_Model1" on a specific dataset you would run the following command:
 
-## Test Simulation Data
+## If Predicting Simulated Data with ground truth
 ```bash
-python -m specunet_pkg --test_sim --exp_name NarrowGlass_488_G2_300nm_195fixed_20k --model_type unet --test_path "Data/Testing/NarrowGlass_488_G2_300nm_195fixed_5k.mat" --test_size 2000 --input_name normalized_sptimg4 --target_name normalized_tbg4 --GTspt normalized_GTspt
+python -m specunet_pkg --test_sim --exp_name "Trained_Model1" --model_type unet --test_path "data/TestingData.mat" --test_size 5000 --input_name "sptimg4" --target_name "tbg4" --GTspt "GTspt"
 ```
 Alternatively use config data:
 ```bash
-python main.py --test_sim --exp_name "Att_Model_Test" --config "config/SpecUNet.json"
+python main.py --test_sim --exp_name "Trained_Model1" --config "config/SpecUNet.json"
 ```
-## Test Experimental Data
-```bash
-python -m specunet_pkg --test_exp --exp_name "Att_Model_Test" --test_path "Data/Testing_Normalized_B4_001.mat" --test_size 100 --input_name "normalized_sptimg4"  --model_type "unet"
-```
-If you would like to test specific models, lease specify the `--model_type`
-(Can add a spt calculation step for experimental dataset)
 
- ```bash
-python -m specunet_pkg --test_exp --exp_name "Perlin40k_Pperlin50k_MatchNorm" --test_path "Data/Bseries/Normalized_B4_001.mat" --test_size 100 --input_name "sptimg4" --model_type "unet"
- ```
+If you would like to then to test the pretrained model under "Trained_Model1" on an experimental dataset called `ExpTestingData.mat` with 1163
+samples and target variable of `final_bbimg`, you would run the following command:
+
+## If Predicting Experimental Data without ground truth
+```bash
+python -m specunet_pkg --test_exp --exp_name "Trained_Model1" --test_path "Data/ExpTestingData.mat" --test_size 1163 --input_name "final_bbimg"  --model_type "unet"
+```
+
+Alternatively use config data:
+```bash
+python main.py --test_exp --exp_name "Trained_Model1" --config "config/SpecUNet.json"
+```
 
 ### Hyperparameter Tuning
 
