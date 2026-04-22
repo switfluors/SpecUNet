@@ -1,0 +1,119 @@
+{
+    "experiment_name": "Default",
+    "device_args": {
+        "distributed": false,
+        "device": "cuda",
+        "gpu_ids": [
+            0
+        ]
+    },
+    "phase": {
+        "train": false,
+        "test_sim": false,
+        "test_exp": false
+    },
+    "exp_path": {
+        "base_dir": "test_models",
+        "save_tiff_images": false,
+        "save_model_onnx": false,
+        "sim_results": "sim_rep_samples",
+        "exp_results": "exp_rep_samples",
+        "configs": "configs",
+        "spectrum_metrics": "spectrum_metrics",
+        "peak_metrics": "peak_metrics"
+    },
+    "datasets": {
+        "data_type": {
+            "type": "spectral",
+            "norm": true,
+            "input_name": "sptimg4",
+            "target_name": "tbg4",
+            "GTspt": "GTspt",
+            "spt": "spt",
+            "seed": 42
+        },
+        "train": {
+            "args": {
+                "data_root": "data/Sample_TrainingData_10000.mat",
+                "data_len": 0,
+                "percent": false
+            },
+            "dataloader": {
+                "validation_split": 0,
+                "args": {
+                    "batch_size": 16,
+                    "num_workers": 0,
+                    "shuffle": true,
+                    "pin_memory": false
+                },
+                "val_args": {
+                    "batch_size": 16,
+                    "num_workers": 0,
+                    "shuffle": false,
+                    "pin_memory": false
+                }
+            }
+        },
+        "test_sim": {
+            "args": {
+                "data_root": "data/TestingData.mat",
+                "data_len": 0
+            },
+            "dataloader": {
+                "args": {
+                    "batch_size": 32,
+                    "num_workers": 0,
+                    "pin_memory": false,
+                    "shuffle": false
+                }
+            }
+        },
+        "test_exp": {
+            "args": {
+                "data_root": "data/ExpTestingData.mat",
+                "data_len": 0
+            },
+            "dataloader": {
+                "args": {
+                    "batch_size": 16,
+                    "num_workers": 0,
+                    "pin_memory": false,
+                    "shuffle": false
+                }
+            }
+        }
+    },
+    "model": {
+        "name": "all",
+        "hyperparameters": {
+            "optimizer": "adam",
+            "epochs": 250,
+            "lr": 0.001,
+            "weight_decay": 1e-05,
+            "lr_scheduler": "step",
+            "initializer": "none",
+            "scheduler_args": {
+                "step_size": 50,
+                "gamma": 0.2,
+                "T_max": 250,
+                "pct_start": 0.1
+            }
+        },
+        "input_size": [
+            1,
+            16,
+            128
+        ],
+        "loss_fn": "mse",
+        "loss_fn_args": {
+            "tv_weight": 1e-05
+        },
+
+        "metrics": {
+            "image_wise": ["RMSE", "PSNR", "SSIM"],
+            "localization_wise": [],
+            "spectral_wise": ["Spearman rho", "Pearson r", "Centroid GT (nm)", "Centroid Raw (nm)", "Centroid % Error"],
+            "summary_output": ["mean_centroid_rawspt", "std_centroid_rawspt", "mean_centroid_spef", "std_centroid_spef"]
+        }
+    }
+}
