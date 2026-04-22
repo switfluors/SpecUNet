@@ -1,26 +1,24 @@
 # SpecUNet
 
-SpecUNet is a repository for denoising and analyzing spectroscopic single-molecule localization microscopy (sSMLM) data using a U-Net-based deep learning workflow. The project is based on a framework that combines Monte Carlo simulation, supervised learning, and quantitative evaluation for accurate single-molecule spectral image analysis. :contentReference[oaicite:0]{index=0}
+SpecUNet is a repository for denoising and analyzing spectroscopic single-molecule localization microscopy (sSMLM) data using a U-Net-based deep learning workflow. This project includes both MATLAB and Python implementations of the SpecUNet framework for simulation, training, testing, and evaluation.
 
-This repository contains two implementations of the SpecUNet workflow:
+The work is associated with the following article:
 
-- **MATLAB/** — MATLAB scripts for data simulation, network training, and evaluation
-- **Python/** — A configurable Python implementation for training, testing, and metric-based evaluation workflows :contentReference[oaicite:1]{index=1}
+[Mao, H. et al. “Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning.” *Analytical Chemistry* (2025)](https://pubs.acs.org/doi/full/10.1021/acs.analchem.5c01486)
 
 ## Overview
 
 SpecUNet is designed to support the following tasks:
 
-- Simulate training and testing data for sSMLM image denoising
+- Simulate Monte Carlo training and testing data for sSMLM image denoising
 - Train a U-Net-based model to predict background and recover denoised spectral images
-- Evaluate model performance on simulated or experimental datasets
-- Provide a foundation for reproducible development across MATLAB and Python implementations 
+- Evaluate model performance on simulated and experimental datasets
+- Support reproducible workflows in both MATLAB and Python
 
 ## Repository Structure
 
 ```text
 .
-├── MATLAB/     # MATLAB implementation and documentation
-├── Python/     # Python implementation and documentation
+├── MATLAB/     # MATLAB implementation and detailed README
+├── Python/     # Python implementation and detailed README
 └── README.md   # Main repository overview
-
