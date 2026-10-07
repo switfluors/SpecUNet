@@ -85,7 +85,7 @@ all the relevant layers, which are color-coded consistent with the legend below:
 * Red - Pooling Layer
 * Blue - Convolution Layer
 
-![Conventional UNet Structure](images/specunet_architecture.png)
+![Conventional UNet Structure](https://github.com/switfluors/SpecUNet/blob/main/Python/images/conventional_unet_structure.png)
 
 ## Setup/Installation
 You can install SpecUNet either by downloading the PyPI release / prepackaged release (recommended for general use) or by cloning the source code directly (recommended for developers and contributors).
