@@ -3,15 +3,14 @@ This project implements a deep learning model with a U-Net-based architecture fo
 The goal is to predict background signals and produce denoised spectral images that preserve useful spectral information for downstream analysis. 
 Implementation is highly configurable, supporting different training and testing datasets, adjustable hyperparameters, and reproducible evaluation workflows.
 
-> Reference: Mao, H. et al. “Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning,” *Analytical Chemistry* (2025). :contentReference[oaicite:4]{index=4}
 
 ## Table of Contents
 1. [Project Structure](#project-structure)
-2. [Models](#models)
-3. [Setup](#setup)
+2. [SpecUNet Architecture](#specunet-architecture-)
+3. [Setup](#setupinstallation)
 4. [Usage](#usage)
-5. [Contributions](#contributions)
-6. [Acknowledgments](#acknowledgments)
+6. [Citation](#citation)
+7. [Acknowledgments](#acknowledgments)
 
 ## Project Structure
 ```markdown
@@ -330,6 +329,28 @@ python main.py --test_exp --exp_name "Trained_Model1" --config "config/SpecUNet.
 The `hyperparameter_search.py` file allows for optimizing the performance of a given model on a dataset by 
 testing the search space of the given hyperparameter that can be called via `python main.py --train`, similar to
 GridSearchCV class in `scikit-learn`, though not as efficient.
+
+## Citation
+
+If you use SpecUNet in your research, please cite our paper:
+
+Mao, H., Liu, Y., KanchanadeviVenkataraman, O., Shahid, M. A., Laplante, C., Xu, D., & Zhang, Y. (2025). Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning. *Analytical Chemistry*, 97(30), 16250–16258. https://doi.org/10.1021/acs.analchem.5c01486
+
+### BibTeX
+
+```bibtex
+@article{mao2025framework,
+  author    = {Mao, Hongjing and Liu, Yunshu and KanchanadeviVenkataraman, Obblivignes and Shahid, Md Abul and Laplante, Caroline and Xu, Dongkuan and Zhang, Yang},
+  title     = {Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning},
+  journal   = {Analytical Chemistry},
+  volume    = {97},
+  number    = {30},
+  pages     = {16250--16258},
+  year      = {2025},
+  doi       = {10.1021/acs.analchem.5c01486},
+  url       = {[https://doi.org/10.1021/acs.analchem.5c01486](https://doi.org/10.1021/acs.analchem.5c01486)}
+}
+```
 
 ## Acknowledgments
 
