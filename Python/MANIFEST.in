@@ -1,2 +1,4 @@
+include README.md
+include setup.cfg
 recursive-include specunet_pkg/config *.json
 prune specunet_pkg/spectra_crop
