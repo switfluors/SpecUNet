@@ -1,6 +1,7 @@
 import time
 import json
 import traceback
+from datetime import datetime
 from importlib import resources
 
 # --- Relative Imports ---
@@ -12,14 +13,29 @@ from .logger import log_print
 from . import praser
 
 
+def get_spt_array(ds_or_obj):
+    """Helper to extract reference spectrum array safely from dataset or wrapper."""
+    if ds_or_obj is None:
+        return None
+    if hasattr(ds_or_obj, "get_spt") and callable(getattr(ds_or_obj, "get_spt")):
+        try:
+            return ds_or_obj.get_spt()
+        except Exception:
+            pass
+    for attr in ["spt", "GTspt", "gt_spt", "rawspt"]:
+        val = getattr(ds_or_obj, attr, None)
+        if val is not None:
+            return val
+    return None
+
+
 def main(manual_args=None):
     """
-    Main entry point. 
+    Main entry point.
     """
     project_root = os.getcwd()
     ignore_warnings()
 
-    # 1. Initialize default summary response
     _summary = {
         "success": False,
         "error": None,
@@ -33,19 +49,16 @@ def main(manual_args=None):
 
     opt = None
     logger = None
-    summary = {}
+    summaries = {}
     output_metrics_dict = {}
 
-    # --- Argument Injection Logic ---
     original_argv = sys.argv
     if manual_args is not None:
         sys.argv = ["specunet"] + manual_args
 
     try:
-        # --- Setup & Config Parsing ---
         args = praser.parse_args()
 
-        # Check if the user omitted the config argument or if the path doesn't exist
         if not args.config or not os.path.exists(args.config):
             print("[main] No valid config path provided. Loading default config...")
             try:
@@ -57,7 +70,6 @@ def main(manual_args=None):
 
         opt = praser.parse_json(args)
 
-        # Update summary with known configuration details
         _summary["phase"] = get_phases(opt["phase"])
         _summary["output_folder"] = os.path.join(os.path.abspath(opt["exp_path"]["base_dir"]), opt["experiment_name"])
 
@@ -76,25 +88,29 @@ def main(manual_args=None):
 
         # --- Training Phase ---
         if opt["phase"]["train"]:
+            logger = start_logging()
+            log_phase(logger, "train")
+            log_print(logger, f"[main] Using experiment name '{opt['experiment_name']}' for training...")
+
+            log_print(logger, "[main] Loading training and validation datasets...")
+            training_times = {}
+            train_loader, val_loader = get_train_datasets(opt_dataset, opt_model["input_size"])
+            log_print(logger, "[main] Loaded training and validation datasets!")
 
             create_folder(opt["experiment_name"])
             os.chdir(opt["experiment_name"])
 
-            logger = start_logging(os.getcwd())
-
-            log_phase(logger, "train")
-            log_print(logger, f"[main] Using experiment name {opt['experiment_name']} for training...")
-
-            log_print(logger, f"[main] Loading training and validation datasets...")
-            training_times = {}
-            train_loader, val_loader = get_train_datasets(opt_dataset, opt_model["input_size"])
-            log_print(logger, f"[main] Loaded training and validation datasets!")
-
             models = get_models(device, opt_model)
-            log_print(logger, f"[main] Available models:", ", ".join(models.keys()))
+            log_print(logger, "[main] Available models:", ", ".join(models.keys()))
 
             for model_name, model in models.items():
                 log_print(logger, f"[main] Training {model_name}...")
+
+                # --- RESUME / FINE-TUNING WEIGHT LOADING ---
+                if opt.get("resume"):
+                    log_print(logger, f"[main] Resuming weights for {model_name} from: {opt['resume']}")
+                    load_resume_weights(model, model_name, opt["resume"], device, logger)
+
                 os.makedirs(model_name, exist_ok=True)
                 os.chdir(model_name)
 
@@ -117,26 +133,23 @@ def main(manual_args=None):
         if opt["phase"]["test_sim"] or opt["phase"]["test_exp"]:
             test_phase = "test_sim" if opt["phase"]["test_sim"] else "test_exp"
 
+            logger = start_logging()
+            log_phase(logger, test_phase)
+
             experiment_abs_path = os.path.join(project_root, opt["exp_path"]["base_dir"], opt["experiment_name"])
 
             if os.path.exists(experiment_abs_path):
                 os.chdir(experiment_abs_path)
 
-            # Restart logger for testing phase
-            logger = start_logging(os.getcwd())
-            log_phase(logger, test_phase)
-
             log_print(logger, f"[main] Using experiment name {opt['experiment_name']} for {test_phase}...")
 
             models = get_models(device, opt_model)
-            log_print(logger, f"[main] Available model(s):", ", ".join(models.keys()))
+            log_print(logger, "[main] Available model(s):", ", ".join(models.keys()))
 
-            log_print(logger, f"[main] Loading test dataset...")
-            test_dataset = get_test_datasets(opt_dataset, input_shape=np.array(opt_model["input_size"]),
-                                             opt_phase=opt["phase"])
-            log_print(logger, f"[main] Loaded test dataset!")
+            log_print(logger, "[main] Loading test dataset...")
+            test_dataset = get_test_datasets(opt_dataset, input_shape=np.array(opt_model["input_size"]), opt_phase=opt["phase"])
+            log_print(logger, "[main] Loaded test dataset!")
 
-            # Replace sys.exit() with standard exceptions so the outer block can catch them
             try:
                 for model_folder in models.keys():
                     models = load_model(models, model_folder, device, base_path=experiment_abs_path)
@@ -145,32 +158,53 @@ def main(manual_args=None):
             except Exception as e:
                 raise RuntimeError(f"Failed to load model weights for '{model_folder}': {e}")
 
-            summary = test(models, test_dataset, device, logger, opt)
+            # Prepare evaluation payload
+            opt["is_sim_phase"] = opt["phase"]["test_sim"]
+            opt["is_spectral"] = (opt["datasets"]["data_type"]["type"] == "spectral")
+
+            ds = test_dataset.dataset if hasattr(test_dataset, "dataset") else test_dataset
+            opt["test_data"] = {
+                "sptimg4_test": getattr(ds, "sptimg4_test", getattr(ds, "inputs", getattr(ds, "data", None))),
+                "tbg4_test": getattr(ds, "tbg4_test", getattr(ds, "tbg", getattr(ds, "targets", None))),
+                "gt_spt_test": getattr(ds, "gt_spt_test", getattr(ds, "gt_spt", getattr(ds, "GTspt", None))),
+                "spt": get_spt_array(ds),
+                "wavelengths": getattr(ds, "wavelengths", np.linspace(500, 800, 301)),
+            }
+
+            opt["models"] = models
+            opt["test_dataset"] = test_dataset
+            opt["device"] = device
+
+            # Invoke test evaluation module
+            summaries = test(
+                models=models,
+                test_dataset=test_dataset,
+                device=device,
+                logger=logger,
+                opt=opt,
+            )
 
             if opt["phase"]["test_sim"]:
-                output_metrics_keys = opt_model["metrics"]["summary_output"]
-                output_metrics_dict = {k: v for k, v in summary.items() if k in output_metrics_keys}
-                _summary.update(output_metrics_dict)
+                output_metrics_keys = opt_model["metrics"].get("summary_output", [])
+                for summary_model_name, model_summary in (summaries or {}).items():
+                    output_metrics_dict = {
+                        f"{summary_model_name}.{k}": v
+                        for k, v in model_summary.items()
+                        if not output_metrics_keys or k in output_metrics_keys
+                    }
+                    _summary.update(output_metrics_dict)
 
-        # If we reached this point without errors, the operations succeeded
         _summary["success"] = True
 
     except Exception as e:
-        # Catch any error, mark as failed, and capture the error message
         _summary["success"] = False
         _summary["error"] = str(e)
-
-        # Optional: Print traceback to console so you don't lose debugging context locally
         print(f"\n[main] ERROR CAUGHT:\n{traceback.format_exc()}")
 
     finally:
-        # --- Cleanup & Summary Construction ---
-
-        # Restore original argv
         if manual_args is not None:
             sys.argv = original_argv
 
-        # Safely restore working directory in case it crashed while nested deep in folders
         os.chdir(project_root)
 
         end_time = datetime.now()
@@ -182,10 +216,7 @@ def main(manual_args=None):
             log_print(logger, "[main] Total time: " + timestring)
             end_logging(logger)
 
-        # Emit structured summary
         print(f"\n[SUMMARY_JSON] {json.dumps(_summary)} [/SUMMARY_JSON]\n", flush=True)
-
-        # Return the parsed dictionary
         return _summary
 
 

@@ -10,11 +10,11 @@ import hdf5storage
 from .dataset import create_dataloader
 from .metrics import *
 from .logger import log_print
+from .figures import save_metrics_comparison_figure
 
 def save_predictions_npz_and_mat(save_dir: str,
                                  pred_bg: np.ndarray,
                                  pred_img: np.ndarray,
-                                 input_img: np.ndarray,
                                  is_sim_phase: bool,
                                  gt_bg: np.ndarray = None,
                                  gt_img: np.ndarray = None,
@@ -28,20 +28,22 @@ def save_predictions_npz_and_mat(save_dir: str,
     Expected shapes typically:
       pred_bg:   (N, H, W)
       pred_img:  (N, H, W)
-      input_img: (N, H, W)
       gt_bg/gt_img same if provided
+
+    The model input is deliberately not written out: it is a verbatim copy of
+    the source .mat's input variable, and on a 150k-frame set that third array
+    costs ~1.3 GiB of RAM plus ~2 GiB of NPZ + MAT per model for nothing.
+    Recover it as pred_img + pred_bg if a consumer needs it standalone.
     """
     os.makedirs(save_dir, exist_ok=True)
 
     # Cast to float32 (safe + smaller)
     pred_bg_f   = np.asarray(pred_bg, dtype=np.float32)
     pred_img_f  = np.asarray(pred_img, dtype=np.float32)
-    input_img_f = np.asarray(input_img, dtype=np.float32)
 
     mdict = {
         "pred_bg": pred_bg_f,
         "pred_img": pred_img_f,
-        "input_img": input_img_f,
     }
 
     if is_sim_phase:
@@ -183,7 +185,7 @@ def save_rep_samples(model_name, data_to_plot, is_sim_phase, opt, logger, input_
 
     fig, axes = plt.subplots(len(rep_indices), num_cols, figsize=(num_cols * 10, len(rep_indices) * (3 if is_spectra else 10)))
     fig.suptitle(
-        f"Conventional UNet: Representative Samples ({title_suffix})",
+        f"{'Conventional UNet'}: Representative Samples ({title_suffix})",
         fontsize=36, fontweight='bold')
 
     save_dir = os.path.join(model_name, opt["exp_path"][save_results_key],
@@ -198,14 +200,16 @@ def save_rep_samples(model_name, data_to_plot, is_sim_phase, opt, logger, input_
         pred_bg = data_to_plot['YPred'][idx]
         input_img = data_to_plot['sptimg4_test'][idx]
 
-        # Ensure shape is (1, 16, 128) if input is (1, 128, 16)
-        if input_shape == (1, 128, 16):
-            pred_bg = np.transpose(pred_bg, (0, 2, 1))
-            input_img = np.transpose(input_img, (0, 2, 1))
+        # Display with the 128 spectral bins horizontal. input_size comes from
+        # JSON as a list, and the images here are 2-D (channel axis already
+        # squeezed), so compare as tuple and swap the last two axes only.
+        if tuple(input_shape) == (1, 128, 16):
+            pred_bg = np.swapaxes(pred_bg, -2, -1)
+            input_img = np.swapaxes(input_img, -2, -1)
 
         pred_img = input_img - pred_bg
 
-        # Build the map of images to save
+        # Build the map of images to save                                        i
         save_map = {
             f"Input_{idx}.tif": input_img,
             f"Out_BG_{idx}.tif": pred_bg,
@@ -215,10 +219,9 @@ def save_rep_samples(model_name, data_to_plot, is_sim_phase, opt, logger, input_
             gt_bg = data_to_plot['tbg4_test'][idx]
             gt_img = data_to_plot['gt_spt_test'][idx]
 
-            # Ensure shape is (1, 16, 128) if input is (1, 128, 16)
-            if input_shape == (1, 128, 16):
-                gt_bg = np.transpose(gt_bg, (0, 2, 1))
-                gt_img = np.transpose(gt_img, (0, 2, 1))
+            if tuple(input_shape) == (1, 128, 16):
+                gt_bg = np.swapaxes(gt_bg, -2, -1)
+                gt_img = np.swapaxes(gt_img, -2, -1)
 
             save_map.update({f"GT_BG_{idx}.tif": gt_bg, f"GT_{idx}.tif": gt_img})
 
@@ -269,7 +272,12 @@ def test(models, test_dataset, device, logger, opt):
     is_spectral = opt['datasets']['data_type']['type'] == 'spectral'
     data_name_key = 'test_sim' if is_sim_phase else 'test_exp'
 
-    summary = None
+    # One summary per model; previously a single variable was overwritten each
+    # loop iteration, so the returned metrics only ever described the last model.
+    summaries = {}
+
+    # Per-model data collected along the way for the final comparison figure.
+    figure_data = {}
 
     if not is_sim_phase and not opt['phase']['test_exp']:
         log_print(logger, "No test phase specified. Exiting.")
@@ -311,9 +319,33 @@ def test(models, test_dataset, device, logger, opt):
     sptimg4_test = np.squeeze(np.concatenate(sptimg4_list, axis=0), axis=1)
     spt = test_dataset.get_spt()
 
+    # The per-batch list is a full second copy of the input stack and nothing
+    # reads it again (sptimg4_test is a view onto the concatenated array, which
+    # keeps its own base alive). On a 170k-frame experimental set that is
+    # 2.6 GiB of float64 held for no reason.
+    del sptimg4_list
+
     # Save data
     for model_name, y_pred_list in model_outputs.items():
         model_outputs[model_name] = np.squeeze(torch.cat(y_pred_list, dim=0).numpy(), axis=1)
+        # Without this the name stays bound to the last model's per-batch
+        # tensors for the rest of the function, pinning another full copy.
+        # Dropping it here also means the next model's torch.cat runs with the
+        # previous model's batch list already released.
+        del y_pred_list
+
+    # Opt-in correction for a systematic background offset. Set this to the
+    # mean(pred_bg - gt_bg) reported by the diagnostics below for the dataset in
+    # use; it is subtracted from the prediction. Applying it here keeps every
+    # downstream consumer (spectral metrics, saved arrays, peak fits) consistent.
+    # The offset is dataset-dependent, so measure before setting it rather than
+    # carrying a value over from another run.
+    bg_bias_correction = float(opt['model'].get('bg_bias_correction') or 0.0)
+    if bg_bias_correction:
+        log_print(logger, f"[{test_phase}] Applying background bias correction of "
+                          f"{bg_bias_correction:+.6f} (subtracted from predicted background)")
+        for model_name in model_outputs:
+            model_outputs[model_name] = model_outputs[model_name] - bg_bias_correction
 
     if is_spectral and is_sim_phase:
         log_print(logger, "[test_sim] Computing and saving spectral metrics...")
@@ -321,6 +353,8 @@ def test(models, test_dataset, device, logger, opt):
                                        + opt['model']['metrics']['spectral_wise'])
 
         for model_name, model_output in model_outputs.items():
+
+            # directory: unet/spectrum_metrics (or whatever you set in JSON)
             spectrum_output_dir = os.path.join(
                 model_name,
                 opt["exp_path"].get("spectrum_metrics", "spectrum_metrics")
@@ -332,7 +366,7 @@ def test(models, test_dataset, device, logger, opt):
                 "spectrum_wise_metrics_no_fit.csv"
             )
             log_print(logger, "[Spectrum Metrics] Saving spectrum metrics...")
-            compute_and_save_spectral_metrics(
+            df_spec_metrics, _ = compute_and_save_spectral_metrics(
                 sptimg4_test,
                 model_output,
                 spt,
@@ -342,8 +376,13 @@ def test(models, test_dataset, device, logger, opt):
                 input_shape=opt['model']['input_size'],
                 predict_background=True
             )
+            figure_data.setdefault(model_name, {})['spectral'] = df_spec_metrics
 
             log_print(logger, f"[Spectrum Metrics] saved to: {output_path}")
+
+        # The loop variable outlives the loop and would pin the last model's
+        # full prediction stack through every save below.
+        del model_output
 
     if is_sim_phase:
         tbg4_test = np.squeeze(np.concatenate(tbg4_list, axis=0), axis=1)
@@ -355,8 +394,13 @@ def test(models, test_dataset, device, logger, opt):
     localization_metrics = get_localization_wise_metrics(opt['model']['metrics']['localization_wise'])
 
     model_data = {}
-    for model_name, y_pred_list in model_outputs.items():
-        y_pred = y_pred_list
+    # Pop each model's stack out of model_outputs as it is consumed. At 150k+
+    # frames one stack is ~2.5 GiB of float64, and holding every model's array
+    # alive across the saves (on top of the input stack, pred_img and the
+    # float32 casts) was enough to exhaust RAM mid-write. Iterate a key
+    # snapshot since the dict is mutated.
+    for model_name in list(model_outputs):
+        y_pred = model_outputs.pop(model_name)
 
         # Prepare the dictionary for the saving functions
         data_to_plot = {
@@ -379,6 +423,26 @@ def test(models, test_dataset, device, logger, opt):
         gt_bg = tbg4_test if is_sim_phase else None
         gt_img = gt_spt_test if is_sim_phase else None
 
+        bg_metrics = {}
+        if is_sim_phase:
+            bg_metrics = compute_background_metrics(
+                pred_bg, gt_bg, pred_img, gt_img,
+                bg_threshold=float(opt['model'].get('bg_mask_threshold') or 0.01)
+            )
+            log_print(logger, f"[test_sim] {model_name} background diagnostics:")
+            log_print(logger, f"[test_sim]   mean(pred_bg - gt_bg) = {bg_metrics['bg_bias']:+.6f} "
+                              f"(std {bg_metrics['bg_bias_std']:.6f})")
+            log_print(logger, f"[test_sim]   leftover intensity in GT-background pixels = "
+                              f"{bg_metrics['leftover_in_bg']:.6f}")
+            log_print(logger, f"[test_sim]   peak-to-background contrast = "
+                              f"{bg_metrics['contrast_pred']:.4f} vs GT {bg_metrics['contrast_gt']:.4f} "
+                              f"(deficit {bg_metrics['contrast_deficit']:.4f})")
+            # Per-image arrays feed the figure's paired tests; keep them out of
+            # the scalar summary that gets serialised to JSON.
+            bg_per_image = bg_metrics.pop("per_image", None)
+            figure_data.setdefault(model_name, {})['bg'] = bg_metrics
+            figure_data[model_name]['bg_per_image'] = bg_per_image
+
         # Save folder: unet/results/<dataset_name>
         dataset_name = opt["datasets"][data_name_key]["args"]["name"]
         results_dir = os.path.join(model_name, "results", dataset_name)
@@ -392,7 +456,6 @@ def test(models, test_dataset, device, logger, opt):
             save_dir=results_dir,
             pred_bg=pred_bg,
             pred_img=pred_img,
-            input_img=input_img,
             is_sim_phase=is_sim_phase,
             gt_bg=gt_bg,
             gt_img=gt_img,
@@ -401,6 +464,11 @@ def test(models, test_dataset, device, logger, opt):
 
         log_print(logger, f"[{test_phase}] Saved predictions as NPZ file: {npz_path}")
         log_print(logger, f"[{test_phase}] Saved predictions as MAT v7.3 file: {mat_path}")
+
+        # Nothing below reads pred_img -- save_rep_samples recomputes it for the
+        # handful of frames it plots -- so drop the full-size difference now
+        # rather than carrying it through the rest of the iteration.
+        del pred_img
 
         # Call the refactored save_rep_samples with a single phase flag
         save_rep_samples(
@@ -419,6 +487,10 @@ def test(models, test_dataset, device, logger, opt):
         if is_sim_phase:
             for metric_name in image_wise_metrics.keys():
                 image_wise_metrics_results[metric_name] = image_wise_metrics[metric_name](y_pred, tbg4_test)
+            figure_data.setdefault(model_name, {})['image_wise'] = {
+                k: np.asarray(v) for k, v in image_wise_metrics_results.items()
+                if v is not None
+            }
             # Only calculate RMSE if ground truth is available
             if image_wise_metrics['RMSE']:
                 # rmse = metrics_results["RMSE"](y_pred, tbg4_test)
@@ -468,14 +540,26 @@ def test(models, test_dataset, device, logger, opt):
             # log_print(logger, f"Corrected rawspt shape: {rawspt.shape}")
 
             # --- 2. Build predicted spectra vq using the spectral extraction logic ---
-            sptimg = sptimg4_test.astype(np.float64)  # (N,128,16)
-            pred_bg = y_pred.astype(np.float64)  # (N,128,16)
+            # Orientation must match compute_and_save_spectral_metrics: the goal is
+            # (N, 16 spatial rows, 128 spectral bins). normalize_dataset already
+            # delivers that when input_size is [1,16,128], so swapping is only
+            # correct when the configured layout puts the 16 rows last. Swapping
+            # unconditionally averages 4 arbitrary spatial columns and then treats
+            # the 16-pixel cross-spectral axis as the spectrum.
+            sptimg = sptimg4_test.astype(np.float64)
+            pred_bg = y_pred.astype(np.float64)
 
-            sptimg_rot = np.swapaxes(sptimg, 1, 2)  # (N,16,128)
-            pred_bg_rot = np.swapaxes(pred_bg, 1, 2)  # (N,16,128)
-            spec_pred = sptimg_rot - pred_bg_rot  # (N,16,128)
+            if tuple(opt['model']['input_size'])[-1] == 16:
+                sptimg = np.swapaxes(sptimg, 1, 2)
+                pred_bg = np.swapaxes(pred_bg, 1, 2)
 
-            N_samples, _, W = spec_pred.shape
+            spec_pred = sptimg - pred_bg  # (N,16,128)
+
+            N_samples, H, W = spec_pred.shape
+            if (H, W) != (16, 128):
+                log_print(logger, f"[Peak Metrics] Warning: expected (N,16,128) spectra "
+                                  f"but got ({N_samples},{H},{W}); check model.input_size.")
+
             orig_x = np.arange(1, W + 1)
             xq = np.linspace(1, W, 301)
             row_slice = slice(6, 10)
@@ -499,8 +583,18 @@ def test(models, test_dataset, device, logger, opt):
             # log_print(logger, f"vq shape: {vq.shape}")
 
             # --- 4. Run your MATLAB-equivalent 2-Gaussian peak fitting ---
-            coefTablerawsptf, coefTableSpef, rawsptf, spef, wavelengths = \
-                fit_two_gaussian_for_peak_metrics(rawspt, vq, wavelengths)
+            # The 2-Gaussian model has no constant term, so residual background
+            # left in the denoised image shows up as a pedestal the fit can only
+            # absorb by widening past the FWHM cut -- and a rejected component
+            # returns amplitude 0, which becomes NaN in the peak metrics.
+            peak_fit_opt = opt['model'].get('peak_fit') or {}
+            coefTablerawsptf, coefTableSpef, rawsptf, spef, wavelengths, fit_status = \
+                fit_two_gaussian_for_peak_metrics(
+                    rawspt, vq, wavelengths,
+                    pedestal=peak_fit_opt.get('pedestal'),
+                    fwhm_max=float(peak_fit_opt.get('fwhm_max') or 250.0),
+                    maxfev=int(peak_fit_opt.get('maxfev') or 5000),
+                )
 
             # --- 5. Save peak metrics ---
             # peak_output_dir = os.path.join(
@@ -523,9 +617,21 @@ def test(models, test_dataset, device, logger, opt):
                 spef=spef,
                 wavelengths=wavelengths,
                 output_dir=peak_output_dir,
-                prefix="Peak_wise_2_gaussian"
+                prefix="Peak_wise_2_gaussian",
+                fit_status=fit_status
             )
 
+            summary.update(bg_metrics)
+            summaries[model_name] = summary
+
+            figure_data.setdefault(model_name, {}).update({
+                'fit_status': fit_status,
+                'peak_errors': Errortable,
+            })
+
+            log_print(logger, f"[Peak Metrics] Fit success rate: "
+                              f"{summary['fit_success_rate'] * 100:.1f}% of "
+                              f"{summary['n_spectra']} spectra")
             log_print(logger, f"[Peak Metrics] Peak metrics saved to: {peak_output_dir}")
 
         if not is_spectral:
@@ -542,8 +648,20 @@ def test(models, test_dataset, device, logger, opt):
                 avg = np.mean(value)
                 log_print(logger, f"[test_exp] {key}: average = {avg}")
 
+        # End of this model's turn: release its prediction stack and the names
+        # aliasing it, so the next model's arrays land in freed memory instead
+        # of on top of them.
+        del y_pred, pred_bg, data_to_plot
+
     if is_sim_phase:
         log_print(logger, "[test_sim] Saving RMSE figures...")
         save_rmse_figures(model_data, logger)
 
-    return summary
+    if is_sim_phase and is_spectral and figure_data:
+        try:
+            save_metrics_comparison_figure(figure_data, "metrics_comparison", logger)
+        except Exception as e:
+            # The figure is a convenience output; never let it sink the test run.
+            log_print(logger, f"[Figures] Could not create metric comparison figure: {e}")
+
+    return summaries

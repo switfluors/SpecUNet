@@ -1,11 +1,10 @@
 import logging
 import sys
-import os
 
 LOG_FILE = "log.log"
 
 # Define a function to set up and return a logger
-def get_logger(path, name="main"):
+def get_logger(name="main"):
     logger = logging.getLogger(name)
 
     # Prevent adding multiple handlers in case of multiple imports
@@ -13,7 +12,7 @@ def get_logger(path, name="main"):
         logger.setLevel(logging.INFO)
 
         # Explicitly set encoding='utf-8'
-        file_handler = logging.FileHandler(os.path.join(path, LOG_FILE), encoding='utf-8')
+        file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
 
         file_handler.setFormatter(logging.Formatter(
             "%(asctime)s - %(levelname)s - %(message)s",

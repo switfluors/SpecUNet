@@ -2,6 +2,7 @@
 This project implements a deep learning model with a U-Net-based architecture for processing single-molecule spectral localization microscopy (sSMLM) images. 
 The goal is to predict background signals and produce denoised spectral images that preserve useful spectral information for downstream analysis. 
 Implementation is highly configurable, supporting different training and testing datasets, adjustable hyperparameters, and reproducible evaluation workflows.
+
 > Reference: Mao, H. et al. “Framework for Accurate Single-Molecule Spectroscopic Imaging Analyses Using Monte Carlo Simulation and Deep Learning,” *Analytical Chemistry* (2025). :contentReference[oaicite:4]{index=4}
 
 ## Table of Contents
@@ -20,12 +21,14 @@ Implementation is highly configurable, supporting different training and testing
 ├── images/                     # Reference images for README.md
 ├── specunet_pkg/               # Main package directory
 │   ├── config/                 # Configuration directory
+│   │   ├── SpecUNet.json                 # Default JSON config
 │   ├── dataset.py              # Data loading and preprocessing functions
+│   ├── figures.py              # Evaluation metric figures
 │   ├── hyperparameter_search.py# Hyperparameter tuning script
 │   ├── main.py                 # Main entry point for training/testing
 │   ├── metrics.py              # Metric calculation functions
 │   ├── models.py               # Model definitions (UNet)
-│   ├── parser.py               # Parsing configuration files
+│   ├── praser.py               # Parsing configuration files
 │   ├── requirements.txt        # List of dependencies
 │   ├── test.py                 # Testing script for background predictions
 │   ├── train.py                # Training script
@@ -33,6 +36,7 @@ Implementation is highly configurable, supporting different training and testing
 ├── test_models/                # Saved trained models and test results (not included)
 ├── .gitignore                  # Git ignore file
 ├── pyproject.toml              # Build system dependencies and config
+├── MANIFEST.in                 # List of files to include in the package
 ├── README.md                   # Project documentation (this file)
 ├── specunet_pkg.egg-info    # Stores build metadata (not included in repo)
 └── setup.cfg                   # Package setup configuration
@@ -81,20 +85,34 @@ all the relevant layers, which are color-coded consistent with the legend below:
 * Red - Pooling Layer
 * Blue - Convolution Layer
 
-![Conventional UNet Structure](images/conventional_unet_structure.png)
+![Conventional UNet Structure](images/specunet_architecture.png)
 
 ## Setup/Installation
-You can install SpecUNet either by downloading a prepackaged release (recommended for general use) or by cloning the source code directly (recommended for developers and contributors).
+You can install SpecUNet either by downloading the PyPI release / prepackaged release (recommended for general use) or by cloning the source code directly (recommended for developers and contributors).
+
+### Prerequisite: PyTorch
+
+By default, PyTorch is installed as CPU-only, however SpecUNet works best when trained on a GPU rather than a CPU.
+
+This repository supports CUDA-enabled GPUs via PyTorch, however it requires installing the CUDA-enabled version of PyTorch based on the GPU you have.
+Please visit https://pytorch.org/get-started/locally/ to install PyTorch on your machine before installing `specunet_pkg`.
+
+```bash
+pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu###
+```
 
 ### Option 1: Prepackaged Release (Recommended)
-If you just want to use the models and functions without modifying the underlying code, you can install the pre-built package directly from our releases.
+
+You can download the latest version from PyPI directly (https://pypi.org/project/specunet-pkg/) via `pip install specunet-pkg`.
+
+If you want to use the models and functions without modifying the underlying code, you can install the pre-built package directly from our releases.
 
 1. Navigate to the [Releases section](https://github.com/switfluors/SpecUNet/releases) of this repository. 
 2. Download the latest .whl (wheel) file from the assets list. 
 3. Open your terminal, navigate to the folder where you downloaded the file, and install it using pip:
 
 ```Bash
-pip install specunet-X.Y.Z-py3-none-any.whl 
+pip install specunet-pkg-X.Y.Z-py3-none-any.whl
 ```
 (Note: Replace X.Y.Z with the actual version number you downloaded).
 
@@ -152,6 +170,7 @@ At the moment, the current Python libraries are being used:
 - `numpy`: Data manipulation
 - `openpyxl` and `pandas`: Storing spreadsheets of spectral metrics
 - `scikit-learn` and `scipy`: Calculating various metrics
+- `scikit-image`: Image processing
 - `tqdm`: Progress monitoring
 - `onnx`: For storing models in ONNX format (only works on non-5070ti GPUs)
 
@@ -296,6 +315,7 @@ If you would like to then to test the pretrained model under "Trained_Model1" on
 samples and target variable of `final_bbimg`, you would run the following command:
 
 ## If Predicting Experimental Data without ground truth
+
 ```bash
 python -m specunet_pkg --test_exp --exp_name "Trained_Model1" --test_path "Data/ExpTestingData.mat" --test_size 1163 --input_name "final_bbimg"  --model_type "unet"
 ```
@@ -313,4 +333,4 @@ GridSearchCV class in `scikit-learn`, though not as efficient.
 
 ## Acknowledgments
 
-We thank Dr. Dongkuan Xu and Dr. Caroline Laplante for their guidance on this project.
+We thank Dr. Yang Zhang, Dr. Dongkuan Xu and Dr. Caroline Laplante for their guidance on this project.

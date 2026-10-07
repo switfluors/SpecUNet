@@ -1,0 +1,2 @@
+recursive-include specunet_pkg/config *.json
+prune specunet_pkg/spectra_crop

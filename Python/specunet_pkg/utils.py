@@ -11,9 +11,11 @@ from datetime import datetime
 from .models import UNet
 from .logger import get_logger, log_print
 
+
 def ignore_warnings():
     warnings.filterwarnings('ignore')
     os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
+
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -23,6 +25,7 @@ def set_seed(seed=42):
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
+
 
 def get_model_path_filename(model_name, model_type='base'):
     """Generates model filename based on model_name and type."""
@@ -44,16 +47,17 @@ def get_model_path_filename(model_name, model_type='base'):
 
     return model_filename
 
+
 def load_model(models, model_folder, device, model_ext="base", base_path=None):
     """
     Loads either ONNX or .pth model based on args.model_ext.
-    
+
     Args:
-        base_path (str, optional): The absolute path to the directory containing 
+        base_path (str, optional): The absolute path to the directory containing
                                    the model folders. If None, uses relative path.
     """
     filename = get_model_path_filename(model_folder, model_ext)
-    
+
     if base_path:
         # Construct absolute path: base_path/model_folder/filename
         model_path = os.path.join(base_path, model_folder, filename)
@@ -68,6 +72,7 @@ def load_model(models, model_folder, device, model_ext="base", base_path=None):
 
     return models
 
+
 def total_variation_loss(x):
     """
     Computes the total variation loss for a batch of images.
@@ -76,6 +81,33 @@ def total_variation_loss(x):
     tv_h = torch.mean(torch.abs(x[:, :, 1:, :] - x[:, :, :-1, :]))
     tv_w = torch.mean(torch.abs(x[:, :, :, 1:] - x[:, :, :, :-1]))
     return tv_h + tv_w
+
+
+def background_region_loss(pred_bg, inputs, gt_img, threshold=0.01):
+    """Penalize signal the model leaves behind in pixels that should be empty.
+
+    The network regresses the background, so the denoised image is
+    ``inputs - pred_bg``. Plain MSE against the background target averages over
+    the whole frame and barely notices a thin residual spread across the empty
+    region -- but that residual is exactly what accumulates when the 16 spatial
+    rows are collapsed into a 1-D spectrum, producing the pedestal that starves
+    the downstream 2-Gaussian fit.
+
+    Ground-truth-empty pixels are those below `threshold` times each image's own
+    peak. Images with no ground-truth signal at all are skipped, since their
+    mask would otherwise cover the entire frame.
+    """
+    pred_img = inputs - pred_bg
+    dims = tuple(range(1, gt_img.ndim))
+
+    peak = gt_img.amax(dim=dims, keepdim=True)
+    mask = (gt_img <= threshold * peak) & (peak > 0)
+
+    count = mask.sum()
+    if count == 0:
+        return pred_bg.sum() * 0.0  # keeps dtype/device and the autograd graph
+
+    return (pred_img.square() * mask).sum() / count
 
 
 def get_models(device, opt):
@@ -114,10 +146,12 @@ def get_models(device, opt):
     # print("Available models:", ", ".join(models.keys()))
     return models
 
+
 def get_loss_fn(opt_model):
     if opt_model["loss_fn"] == "rmse":
         def rmse_loss(output, target):
             return torch.sqrt(torch.mean((output - target) ** 2))
+
         criterion = rmse_loss
     elif opt_model["loss_fn"] == "mse":
         criterion = torch.nn.MSELoss(reduction='mean')
@@ -129,14 +163,31 @@ def get_loss_fn(opt_model):
         mse = torch.nn.MSELoss()
         opt_model_loss_fn = opt_model["loss_fn_args"]
         tv_weight = opt_model_loss_fn["tv_weight"]
+
         def combined_loss(pred, target):
             tv = total_variation_loss(pred)
             return mse(pred, target) + tv_weight * tv
+
         criterion = combined_loss
     else:
         raise ValueError(f"Invalid loss function: {opt_model['loss_fn']}")
 
-    return criterion
+    loss_args = opt_model.get("loss_fn_args") or {}
+    bg_weight = float(loss_args.get("bg_weight") or 0.0)
+    bg_threshold = float(loss_args.get("bg_mask_threshold") or 0.01)
+
+    def criterion_with_background(output, target, inputs=None, gt_img=None):
+        loss = criterion(output, target)
+        if bg_weight > 0 and inputs is not None and gt_img is not None:
+            loss = loss + bg_weight * background_region_loss(output, inputs, gt_img, bg_threshold)
+        return loss
+
+    if bg_weight > 0:
+        print(f"[utils] Background-region loss enabled "
+              f"(weight={bg_weight}, mask threshold={bg_threshold} x per-image peak)")
+
+    return criterion_with_background
+
 
 def get_optimizer(opt_model_hyp, model):
     if opt_model_hyp["optimizer"] == "adam":
@@ -152,6 +203,7 @@ def get_optimizer(opt_model_hyp, model):
         raise ValueError(f"Invalid optimizer: {opt_model_hyp['optimizer']}")
 
     return optimizer
+
 
 def get_lrs(opt_model_hyperparameters, optimizer, train_loader):
     if opt_model_hyperparameters["lr_scheduler"] == "cyclic":
@@ -213,13 +265,53 @@ def initialize_weights(m, init_type):
         init.zeros_(m.bias)
 
 
+def load_resume_weights(model, model_name, resume_path, device, logger=None):
+    """
+    Loads pre-trained weights into the model for fine-tuning.
+    Handles folder directories (for 'unet', 'all')
+    as well as direct .pth file paths safely.
+    """
+    expected_filename = get_model_path_filename(model_name, "base")
+
+    if os.path.isfile(resume_path):
+        file_basename = os.path.basename(resume_path)
+        if model_name not in file_basename.lower() and get_model_path_filename(model_name, "base") != file_basename:
+            raise ValueError(
+                f"[resume] Cannot load file '{file_basename}' into model '{model_name}'. "
+                f"Architecture mismatch. Please pass the experiment folder path instead when using --model_type all."
+            )
+        target_path = resume_path
+
+    elif os.path.isdir(resume_path):
+        # 1. Standard hierarchy: <resume_path>/<model_name>/<model_filename>
+        target_path = os.path.join(resume_path, model_name, expected_filename)
+
+        # 2. Fallback direct hierarchy: <resume_path>/<model_filename>
+        if not os.path.exists(target_path):
+            target_path = os.path.join(resume_path, expected_filename)
+    else:
+        raise FileNotFoundError(f"[resume] Resume path '{resume_path}' does not exist.")
+
+    if not os.path.exists(target_path):
+        raise FileNotFoundError(f"[resume] Could not find checkpoint file for '{model_name}' at: {target_path}")
+
+    log_msg = f"[resume] Loading pre-trained weights for '{model_name}' from: {os.path.abspath(target_path)}"
+    if logger:
+        log_print(logger, log_msg)
+    else:
+        print(log_msg)
+
+    state_dict = torch.load(target_path, map_location=device)
+    model.load_state_dict(state_dict)
+    return model
+
+
 def create_folder(folder):
-    if not os.path.exists(folder):
-        os.mkdir(folder, exists_ok=True)
+    os.makedirs(folder, exist_ok=True)
 
 
-def start_logging(path):
-    logger = get_logger(path, "Main")
+def start_logging():
+    logger = get_logger("Main")
     log_print(logger, "[main] Command run: python " + " ".join(sys.argv))
     log_print(logger, "[main] Start time: " + datetime.now().strftime("%m/%d/%Y %I:%M:%S %p"))
     return logger
@@ -238,9 +330,11 @@ def end_logging(logger):
 
     print("[main] Logging successfully ended.")
 
+
 def log_phase(logger, phase: str):
     bar = "=" * 50
     logger.info(f"\n{bar}\n>>> PHASE: {phase.upper()} <<<\n{bar}\n")
+
 
 def get_phases(opt_phase):
     phases = ["train", "test_sim", "test_exp"]
@@ -249,6 +343,7 @@ def get_phases(opt_phase):
         if opt_phase[phase]:
             current_phases.append(phase)
     return current_phases
+
 
 def get_total_time(start_time: datetime, end_time: datetime):
     total_time = end_time - start_time

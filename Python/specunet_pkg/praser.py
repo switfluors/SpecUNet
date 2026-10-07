@@ -95,6 +95,11 @@ def parse_args():
     parser.add_argument("--scheduler_step_size", type=int)
     parser.add_argument("--scheduler_gamma", type=float)
 
+    # Model resume training
+    # In parse_args() inside praser.py:
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path or experiment folder name to load pre-trained weights for fine-tuning")
+
     args = parser.parse_args()
 
     # TODO: override json object if any of train, test_sim, test_exp is specified
@@ -117,7 +122,6 @@ def parse_args():
             if args.validation_split == 0 and args.test_size == 0:
                 parser.error("No validation data provided during training")
 
-
     return args
 
 
@@ -133,14 +137,14 @@ def parse_json(args):
     if args.exp_name is not None:
         opt['experiment_name'] = args.exp_name
 
-    # Override phase with args
+    # Override phase with args. Passing any phase flag makes the CLI the sole
+    # authority on which phases run: previously the flags could only turn
+    # phases ON, so `--test_exp` against a config with test_sim=true ran
+    # test_sim on the experimental file and crashed on the missing GT.
     if args.train or args.test_sim or args.test_exp:
-        if args.train and opt['phase']['train'] != args.train:
-            opt['phase']['train'] = args.train
-        if args.test_sim and opt['phase']['test_sim'] != args.test_sim:
-            opt['phase']['test_sim'] = args.test_sim
-        elif args.test_exp and opt['phase']['test_exp'] != args.test_exp:
-            opt['phase']['test_exp'] = args.test_exp
+        opt['phase']['train'] = bool(args.train)
+        opt['phase']['test_sim'] = bool(args.test_sim)
+        opt['phase']['test_exp'] = bool(args.test_exp)
 
     if args.device is not None:
         opt['device_args']['device'] = args.device
@@ -212,6 +216,28 @@ def parse_json(args):
 
         if args.initializer is not None:
             opt['model']['hyperparameters']['initializer'] = args.initializer
+
+        if args.resume is not None:
+            # 1. Resolve resume path to absolute path
+            if not os.path.isabs(args.resume):
+                possible_base_path = os.path.join(opt['exp_path']['base_dir'], args.resume)
+                if os.path.exists(possible_base_path):
+                    opt['resume'] = os.path.abspath(possible_base_path)
+                else:
+                    opt['resume'] = os.path.abspath(args.resume)
+            else:
+                opt['resume'] = args.resume
+
+            # 2. Derive output experiment name from the resume folder/file name if --exp_name is omitted
+            if args.exp_name is None:
+                # Get the folder/file name, handling trailing slashes cleanly
+                resume_base_name = os.path.basename(os.path.normpath(args.resume))
+
+                # If user passed a direct .pth file, strip the extension
+                if resume_base_name.endswith(('.pth', '.pt', '.onnx')):
+                    resume_base_name = os.path.splitext(resume_base_name)[0]
+
+                opt['experiment_name'] = f"{resume_base_name}_finetuned"
 
     if opt['phase']['test_sim'] is not None:
         if args.test_path is not None:
