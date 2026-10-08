@@ -8,6 +8,7 @@ import os
 from scipy.io import savemat
 import hdf5storage        # for true -v7.3
 from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 import h5py
 
 
@@ -199,194 +200,287 @@ def _two_gaussian(x, A1, b1, c1, A2, b2, c2):
     return A1 * np.exp(-((x - b1) / c1) ** 2) + A2 * np.exp(-((x - b2) / c2) ** 2)
 
 
-def fit_two_gaussian_for_peak_metrics(rawspt, vq, wavelengths):
+def _eval_two_gaussian(x, A1, b1, c1, A2, b2, c2):
+    """Evaluate the 2-Gaussian model, skipping zero-amplitude components.
+
+    A component rejected by the FWHM cut has A forced to 0 and its width blanked,
+    which would make _two_gaussian divide by zero. Skipping it keeps the returned
+    curve consistent with the coefficients actually reported in the tables.
     """
-    Python version of your MATLAB 2-Gaussian fitting loop.
+    x = np.asarray(x, dtype=np.float64)
+    out = np.zeros_like(x)
+    if A1 > 0 and c1 > 0:
+        out = out + A1 * np.exp(-((x - b1) / c1) ** 2)
+    if A2 > 0 and c2 > 0:
+        out = out + A2 * np.exp(-((x - b2) / c2) ** 2)
+    return out
+
+
+def estimate_pedestal(y, method="percentile", percentile=10.0, edge_frac=0.1):
+    """Estimate the flat baseline under a 1-D spectrum.
+
+    The 2-Gaussian model has no constant term, so any residual background floor
+    has to be absorbed by widening the Gaussians -- which pushes them past the
+    FWHM rejection cut and registers as a fit failure.
+    """
+    y = np.asarray(y, dtype=np.float64)
+    if method == "none" or y.size == 0:
+        return 0.0
+    if method == "min":
+        return float(np.nanmin(y))
+    if method == "percentile":
+        return float(np.nanpercentile(y, percentile))
+    if method == "edges":
+        k = max(1, int(round(edge_frac * y.size)))
+        return float(np.nanmedian(np.concatenate([y[:k], y[-k:]])))
+    raise ValueError(f"Unknown pedestal method: {method}. Use none/min/percentile/edges.")
+
+
+def _initial_guess(x, y, fwhm_max):
+    """Data-driven starting parameters for the 2-Gaussian fit.
+
+    The previous fixed guess used b=mean(x) and c=std(x), i.e. a pair of
+    Gaussians centred mid-axis with FWHM ~205 nm -- already within 20% of the
+    250 nm rejection threshold. A fit that failed to move far from that guess
+    was discarded, so broad or low-contrast spectra failed by construction.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    span = float(x[-1] - x[0]) if x.size > 1 else 1.0
+    amp = float(np.nanmax(y)) if y.size else 0.0
+
+    if not np.isfinite(amp) or amp <= 0:
+        c0 = fwhm_max / (4.0 * 2.355)
+        mid = float(np.mean(x))
+        return [1.0, mid, c0, 0.5, min(mid + c0, float(x[-1])), c0]
+
+    # Width from the half-maximum crossings of the dominant peak.
+    above = np.flatnonzero(y >= 0.5 * amp)
+    fwhm1 = float(x[above[-1]] - x[above[0]]) if above.size >= 2 else 0.1 * span
+    fwhm1 = float(np.clip(fwhm1, 0.02 * span, 0.8 * fwhm_max))
+    c1 = fwhm1 / 2.355
+
+    peaks, props = find_peaks(y, height=0.15 * amp,
+                              distance=max(1, int(round(0.02 * y.size))))
+    if peaks.size:
+        peaks = peaks[np.argsort(props["peak_heights"])[::-1]]
+    else:
+        peaks = np.array([int(np.nanargmax(y))])
+
+    b1, A1 = float(x[peaks[0]]), float(y[peaks[0]])
+    if peaks.size > 1:
+        b2, A2 = float(x[peaks[1]]), float(y[peaks[1]])
+    else:
+        # sSMLM emission spectra carry a vibronic shoulder on the red side.
+        b2, A2 = b1 + fwhm1, A1 / 3.0
+
+    b1 = float(np.clip(b1, x[0], x[-1]))
+    b2 = float(np.clip(b2, x[0], x[-1]))
+    return [max(A1, 1e-12), b1, c1, max(A2, 1e-12), b2, c1]
+
+
+def _fit_one_spectrum(x, y, fwhm_max, maxfev, pedestal_kw):
+    """Fit one spectrum with the 2-Gaussian model.
+
+    Returns a dict of coefficients, the fitted curve, and a status describing
+    exactly how the fit ended, so failures can be counted rather than silently
+    turning into NaN downstream.
+    """
+    y = np.asarray(y, dtype=np.float64)
+
+    pedestal = estimate_pedestal(y, **pedestal_kw)
+    y_corr = np.clip(y - pedestal, 0.0, None)
+
+    dynamic_range = float(np.nanmax(y_corr) - np.nanmin(y_corr)) if y_corr.size else 0.0
+    if not np.isfinite(dynamic_range) or dynamic_range <= 0:
+        return {
+            "A1": 0.0, "b1_nm": 0.0, "fwhm1": 0.0,
+            "A2": 0.0, "b2_nm": 0.0, "fwhm2": 0.0,
+            "ratio": 0.0, "curve": np.zeros_like(y_corr),
+            "pedestal": pedestal, "intensity": float(np.sum(y_corr)),
+            "status": "flat", "converged": False,
+        }
+
+    bounds = ([0.0, float(np.min(x)), 0.0, 0.0, float(np.min(x)), 0.0],
+              [np.inf, float(np.max(x)), np.inf, np.inf, float(np.max(x)), np.inf])
+
+    try:
+        popt, _ = curve_fit(_two_gaussian, x, y_corr,
+                            p0=_initial_guess(x, y_corr, fwhm_max),
+                            bounds=bounds, maxfev=maxfev)
+        A1, b1, c1, A2, b2, c2 = (float(v) for v in popt)
+        converged = True
+    except Exception:
+        A1 = b1 = c1 = A2 = b2 = c2 = 0.0
+        converged = False
+
+    # The model is symmetric under exchange of its two components, so curve_fit
+    # is free to return them in either order. Comparing the prediction's "first
+    # peak" against the ground truth's "first peak" then silently compares two
+    # different physical transitions, injecting an error the size of the peak
+    # separation. Order by centre wavelength; a negligible component ranks last
+    # because its position is not meaningful.
+    amp_floor = 0.01 * max(A1, A2)
+    both_significant = A1 >= amp_floor and A2 >= amp_floor
+    if (b2 < b1) if both_significant else (A2 > A1):
+        A1, b1, c1, A2, b2, c2 = A2, b2, c2, A1, b1, c1
+
+    fwhm1, fwhm2 = c1 * 2.355, c2 * 2.355
+    b1_nm, b2_nm = b1 + 500.0, b2 + 500.0
+    ratio = A1 / A2 if A2 != 0 else 0.0
+
+    rejected = []
+    if fwhm1 > fwhm_max:
+        fwhm1, A1, b1_nm, ratio = 0.0, 0.0, 0.0, 0.0
+        rejected.append("first")
+    if fwhm2 > fwhm_max:
+        fwhm2, A2, b2_nm, ratio = 0.0, 0.0, 0.0, 0.0
+        rejected.append("second")
+
+    if not converged:
+        status = "fit_failed"
+    elif len(rejected) == 2:
+        status = "rejected_both"
+    elif rejected:
+        status = f"rejected_{rejected[0]}"
+    else:
+        status = "ok"
+
+    return {
+        "A1": A1, "b1_nm": b1_nm, "fwhm1": fwhm1,
+        "A2": A2, "b2_nm": b2_nm, "fwhm2": fwhm2,
+        "ratio": ratio,
+        "curve": _eval_two_gaussian(x, A1, b1, c1, A2, b2, c2),
+        "pedestal": pedestal, "intensity": float(np.sum(y_corr)),
+        "status": status, "converged": converged,
+    }
+
+
+def fit_two_gaussian_for_peak_metrics(rawspt, vq, wavelengths,
+                                      pedestal=None, fwhm_max=250.0, maxfev=5000):
+    """
+    Python version of the MATLAB 2-Gaussian fitting loop.
 
     Parameters
     ----------
     rawspt : np.ndarray
-        Raw spectra, shape (len(wavelengths), N)
+        Ground-truth spectra, shape (len(wavelengths), N)
     vq : np.ndarray
-        Smoothed / processed spectra, shape (len(wavelengths), N)
+        Predicted spectra, shape (len(wavelengths), N)
     wavelengths : np.ndarray
         1D wavelength axis in nm, shape (len(wavelengths),)
+    pedestal : dict, optional
+        Baseline-subtraction settings passed to `estimate_pedestal`, plus an
+        `apply_to` key of "both" (default), "pred", or "none". Applying the same
+        correction to both arms keeps the peak/FWHM comparison unbiased.
+    fwhm_max : float
+        Components wider than this (nm) are rejected, matching the MATLAB logic.
+    maxfev : int
+        Function-evaluation budget for `curve_fit`.
 
     Returns
     -------
     coefTablerawsptf : pd.DataFrame
     coefTableSpef    : pd.DataFrame
-    rawsptf          : np.ndarray  # fitted raw spectra, same shape as rawspt
-    spef             : np.ndarray  # fitted vq spectra, same shape as vq
+    rawsptf          : np.ndarray  # fitted GT spectra, same shape as rawspt
+    spef             : np.ndarray  # fitted predicted spectra, same shape as vq
     wavelengths      : np.ndarray  # just passed through
+    fit_status       : pd.DataFrame  # per-spectrum outcome for both arms
     """
     numSpectra = rawspt.shape[1]
     assert vq.shape == rawspt.shape, "vq and rawspt must have same shape"
 
-    # In MATLAB you used x and then added +500 to b1/b2.
-    # Here we mimic that: x = wavelengths - 500, then store b+500 in tables.
+    pedestal = dict(pedestal or {})
+    apply_to = pedestal.pop("apply_to", "both")
+    if apply_to not in ("both", "pred", "none"):
+        raise ValueError(f"pedestal.apply_to must be both/pred/none, got {apply_to!r}")
+    pedestal.setdefault("method", "percentile")
+    pedestal.setdefault("percentile", 10.0)
+
+    pred_kw = pedestal if apply_to in ("both", "pred") else {"method": "none"}
+    gt_kw = pedestal if apply_to == "both" else {"method": "none"}
+
+    # MATLAB fitted on x = wavelengths - 500 and reported b + 500; mirrored here.
     x = wavelengths - 500.0
 
-    # Storage
     spef = np.zeros_like(vq, dtype=np.float64)
     rawsptf = np.zeros_like(rawspt, dtype=np.float64)
 
     coefTableSpef_rows = []
     coefTablerawsptf_rows = []
+    status_rows = []
 
     centroid_spef = np.full(numSpectra, np.nan)
     centroid_rawsptf = np.full(numSpectra, np.nan)
     centroid_rawspt = np.full(numSpectra, np.nan)
 
-    # Intensity = sum of spectrum (like your Intensity(n))
-    Intensity_vq = np.sum(vq, axis=0)
-    Intensity_rawspt = np.sum(rawspt, axis=0)
-
     for n in range(numSpectra):
-        # ---------- 2-Gaussian fit for vq (-> spef) ----------
-        y_vq = vq[:, n]
+        # ---------- predicted spectrum (-> spef) ----------
+        pred = _fit_one_spectrum(x, vq[:, n], fwhm_max, maxfev, pred_kw)
+        spef[:, n] = pred["curve"]
 
-        # Initial guesses
-        A1_0 = np.max(y_vq)
-        b1_0 = np.mean(x)
-        c1_0 = np.std(x)
-        A2_0 = A1_0 / 2.0
-        b2_0 = b1_0 + 1.0
-        c2_0 = c1_0
-
-        p0 = [A1_0, b1_0, c1_0, A2_0, b2_0, c2_0]
-        bounds_lower = [0.0, np.min(x), 0.0, 0.0, np.min(x), 0.0]
-        bounds_upper = [np.inf, np.max(x), np.inf, np.inf, np.max(x), np.inf]
-
-        try:
-            popt, _ = curve_fit(
-                _two_gaussian, x, y_vq, p0=p0,
-                bounds=(bounds_lower, bounds_upper),
-                maxfev=600
-            )
-            A1, b1, c1, A2, b2, c2 = popt
-        except Exception:
-            A1 = b1 = c1 = A2 = b2 = c2 = 0.0
-
-        # Convert c -> FWHM (×2.355) and b -> wavelength (add 500)
-        c1_fwhm = c1 * 2.355
-        c2_fwhm = c2 * 2.355
-        b1_nm = b1 + 500.0
-        b2_nm = b2 + 500.0
-
-        Ratio = A1 / A2 if A2 != 0 else 0.0
-
-        # FWHM > 250 ⇒ zero out (match your MATLAB logic)
-        if c1_fwhm > 250:
-            c1_fwhm = 0.0
-            A1 = 0.0
-            b1_nm = 0.0
-            Ratio = 0.0
-        if c2_fwhm > 250:
-            c2_fwhm = 0.0
-            A2 = 0.0
-            b2_nm = 0.0
-            Ratio = 0.0
-
-        # Fitted curve
-        ypred_spef = _two_gaussian(x, *popt) if (A1 != 0 or A2 != 0) else np.zeros_like(y_vq)
-        spef[:, n] = ypred_spef
-
-        # Centroid of spef
-        I_spef = np.sum(spef[:, n])
-        if I_spef == 0:
-            centroid_spef1 = np.nan
-        else:
-            centroid_spef1 = np.sum(wavelengths * spef[:, n]) / I_spef
-        centroid_spef[n] = centroid_spef1
+        I_spef = float(np.sum(spef[:, n]))
+        centroid_spef[n] = (np.sum(wavelengths * spef[:, n]) / I_spef) if I_spef > 0 else np.nan
 
         coefTableSpef_rows.append({
-            'Spef_firstPeakValues': A1,
-            'Spef_firstPeakWavelengths': b1_nm,
-            'Spef_firstPeakFWHM': c1_fwhm,
-            'Spef_secondPeakValues': A2,
-            'Spef_secondPeakWavelengths': b2_nm,
-            'Spef_secondPeakFWHM': c2_fwhm,
-            'Spef_peakRatio': Ratio,
-            'Intensity': float(Intensity_vq[n]),
-            'centroid_spef': centroid_spef1,
+            'Spef_firstPeakValues': pred["A1"],
+            'Spef_firstPeakWavelengths': pred["b1_nm"],
+            'Spef_firstPeakFWHM': pred["fwhm1"],
+            'Spef_secondPeakValues': pred["A2"],
+            'Spef_secondPeakWavelengths': pred["b2_nm"],
+            'Spef_secondPeakFWHM': pred["fwhm2"],
+            'Spef_peakRatio': pred["ratio"],
+            'Intensity': pred["intensity"],
+            'Spef_pedestal': pred["pedestal"],
+            'centroid_spef': centroid_spef[n],
         })
 
-        # ---------- 2-Gaussian fit for rawspt (-> rawsptf) ----------
-        y_raw = rawspt[:, n]
+        # ---------- ground-truth spectrum (-> rawsptf) ----------
+        gt = _fit_one_spectrum(x, rawspt[:, n], fwhm_max, maxfev, gt_kw)
+        rawsptf[:, n] = gt["curve"]
 
-        A1_0 = np.max(y_raw)
-        b1_0 = np.mean(x)
-        c1_0 = np.std(x)
-        A2_0 = A1_0 / 2.0
-        b2_0 = b1_0 + 1.0
-        c2_0 = c1_0
+        I_rawsptf = float(np.sum(rawsptf[:, n]))
+        centroid_rawsptf[n] = (np.sum(wavelengths * rawsptf[:, n]) / I_rawsptf) if I_rawsptf > 0 else np.nan
 
-        p0 = [A1_0, b1_0, c1_0, A2_0, b2_0, c2_0]
-
-        try:
-            popt_raw, _ = curve_fit(
-                _two_gaussian, x, y_raw, p0=p0,
-                bounds=(bounds_lower, bounds_upper),
-                maxfev=600
-            )
-            A1r, b1r, c1r, A2r, b2r, c2r = popt_raw
-        except Exception:
-            A1r = b1r = c1r = A2r = b2r = c2r = 0.0
-
-        c1r_fwhm = c1r * 2.355
-        c2r_fwhm = c2r * 2.355
-        b1r_nm = b1r + 500.0
-        b2r_nm = b2r + 500.0
-        Ratio_r = A1r / A2r if A2r != 0 else 0.0
-
-        if c1r_fwhm > 250:
-            c1r_fwhm = 0.0
-            A1r = 0.0
-            b1r_nm = 0.0
-            Ratio_r = 0.0
-        if c2r_fwhm > 250:
-            c2r_fwhm = 0.0
-            A2r = 0.0
-            b2r_nm = 0.0
-            Ratio_r = 0.0
-
-        ypred_raw = _two_gaussian(x, *popt_raw) if (A1r != 0 or A2r != 0) else np.zeros_like(y_raw)
-        rawsptf[:, n] = ypred_raw
-
-        # Centroid of rawsptf
-        I_rawsptf = np.sum(rawsptf[:, n])
-        if I_rawsptf == 0:
-            centroid_rawsptf1 = np.nan
-        else:
-            centroid_rawsptf1 = np.sum(wavelengths * rawsptf[:, n]) / I_rawsptf
-        centroid_rawsptf[n] = centroid_rawsptf1
-
-        # Centroid of rawspt
-        I_rawspt = Intensity_rawspt[n]
-        if I_rawspt == 0:
-            centroid_rawspt1 = np.nan
-        else:
-            centroid_rawspt1 = np.sum(wavelengths * rawspt[:, n]) / I_rawspt
-        centroid_rawspt[n] = centroid_rawspt1
+        gt_corr = np.clip(rawspt[:, n] - gt["pedestal"], 0.0, None)
+        I_rawspt = float(np.sum(gt_corr))
+        centroid_rawspt[n] = (np.sum(wavelengths * gt_corr) / I_rawspt) if I_rawspt > 0 else np.nan
 
         coefTablerawsptf_rows.append({
-            'rawsptf_firstPeakValues': A1r,
-            'rawsptf_firstPeakWavelengths': b1r_nm,
-            'rawsptf_firstPeakFWHM': c1r_fwhm,
-            'rawsptf_secondPeakValues': A2r,
-            'rawsptf_secondPeakWavelengths': b2r_nm,
-            'rawsptf_secondPeakFWHM': c2r_fwhm,
-            'rawsptf_peakRatio': Ratio_r,
-            'Intensity': float(Intensity_rawspt[n]),
-            'centroid_rawsptf': centroid_rawsptf1,
-            'centroid_rawspt': centroid_rawspt1,
+            'rawsptf_firstPeakValues': gt["A1"],
+            'rawsptf_firstPeakWavelengths': gt["b1_nm"],
+            'rawsptf_firstPeakFWHM': gt["fwhm1"],
+            'rawsptf_secondPeakValues': gt["A2"],
+            'rawsptf_secondPeakWavelengths': gt["b2_nm"],
+            'rawsptf_secondPeakFWHM': gt["fwhm2"],
+            'rawsptf_peakRatio': gt["ratio"],
+            'Intensity': gt["intensity"],
+            'rawsptf_pedestal': gt["pedestal"],
+            'centroid_rawsptf': centroid_rawsptf[n],
+            'centroid_rawspt': centroid_rawspt[n],
+        })
+
+        status_rows.append({
+            'Index': n,
+            'pred_status': pred["status"],
+            'pred_converged': pred["converged"],
+            'pred_first_valid': pred["A1"] != 0,
+            'pred_second_valid': pred["A2"] != 0,
+            'pred_centroid_valid': np.isfinite(centroid_spef[n]),
+            'pred_pedestal': pred["pedestal"],
+            'gt_status': gt["status"],
+            'gt_converged': gt["converged"],
+            'gt_first_valid': gt["A1"] != 0,
+            'gt_second_valid': gt["A2"] != 0,
+            'gt_centroid_valid': np.isfinite(centroid_rawsptf[n]),
+            'gt_pedestal': gt["pedestal"],
         })
 
     coefTableSpef = pd.DataFrame(coefTableSpef_rows)
     coefTablerawsptf = pd.DataFrame(coefTablerawsptf_rows)
+    fit_status = pd.DataFrame(status_rows)
 
-    return coefTablerawsptf, coefTableSpef, rawsptf, spef, wavelengths
+    return coefTablerawsptf, coefTableSpef, rawsptf, spef, wavelengths, fit_status
 
 def compute_and_save_peak_metrics(
         coefTablerawsptf: pd.DataFrame,
@@ -395,7 +489,8 @@ def compute_and_save_peak_metrics(
         spef: np.ndarray,
         wavelengths: np.ndarray,
         output_dir: str,
-        prefix: str = "Predicted_SC"
+        prefix: str = "Predicted_SC",
+        fit_status: pd.DataFrame = None
 ):
     """
     Compare peak parameters between raw and fitted spectra, compute error metrics,
@@ -481,6 +576,8 @@ def compute_and_save_peak_metrics(
 
     # ---- stats ----
     def mse_rmse(v):
+        if np.all(np.isnan(v)):
+            return np.nan, np.nan
         return np.nanmean(v), np.sqrt(np.nanmean(v))
 
     summary = {
@@ -500,6 +597,37 @@ def compute_and_save_peak_metrics(
         "std_centroid_spef": np.nanstd(centroid_spef),
     }
 
+    # ---- how many spectra each aggregate is actually built from ----
+    # Every statistic above is a nanmean, so a spectrum whose fit collapsed just
+    # disappears from the average instead of registering as an error. Reporting
+    # the surviving count next to each figure keeps that visible.
+    summary["n_spectra"] = int(N)
+    for key, values in errs.items():
+        if key.endswith("_sq"):
+            summary[f"{key[:-3]}_n_valid"] = int(np.count_nonzero(~np.isnan(values)))
+    summary["centroid_spef_n_valid"] = int(np.count_nonzero(~np.isnan(centroid_spef)))
+    summary["centroid_rawspt_n_valid"] = int(np.count_nonzero(~np.isnan(centroid_rawspt)))
+
+    if fit_status is not None and len(fit_status):
+        n = len(fit_status)
+        summary["fit_success_rate"] = float(fit_status["pred_centroid_valid"].mean())
+        summary["fit_failure_rate"] = 1.0 - summary["fit_success_rate"]
+        summary["fit_success_rate_gt"] = float(fit_status["gt_centroid_valid"].mean())
+        summary["fit_converged_rate"] = float(fit_status["pred_converged"].mean())
+        summary["fit_first_peak_valid_rate"] = float(fit_status["pred_first_valid"].mean())
+        summary["fit_second_peak_valid_rate"] = float(fit_status["pred_second_valid"].mean())
+        summary["mean_pedestal_pred"] = float(fit_status["pred_pedestal"].mean())
+        summary["mean_pedestal_gt"] = float(fit_status["gt_pedestal"].mean())
+        for status, count in fit_status["pred_status"].value_counts().items():
+            summary[f"fit_status_{status}"] = int(count)
+
+        print(f"[Peak Metrics] Fit success rate (prediction): "
+              f"{summary['fit_success_rate'] * 100:.1f}% ({int(summary['fit_success_rate'] * n)}/{n})")
+        print(f"[Peak Metrics] Fit success rate (ground truth): "
+              f"{summary['fit_success_rate_gt'] * 100:.1f}%")
+        print(f"[Peak Metrics] Prediction fit outcomes: "
+              f"{dict(fit_status['pred_status'].value_counts())}")
+
     # ---- error table ----
     Errortable = pd.DataFrame({
         "firstPeaks_wavelengths_abs_errors": errs["firstPeaks_wavelengths_abs"],
@@ -518,6 +646,8 @@ def compute_and_save_peak_metrics(
     coefTableSpef.to_csv(os.path.join(output_dir, f"{prefix}_predict_fitted_Results.csv"), index=False)
     coefTablerawsptf.to_csv(os.path.join(output_dir, f"{prefix}_raw_fitted_Results.csv"), index=False)
     Errortable.to_csv(os.path.join(output_dir, f"{prefix}_Errors.csv"), index=False)
+    if fit_status is not None:
+        fit_status.to_csv(os.path.join(output_dir, f"{prefix}_fit_status.csv"), index=False)
 
     # ---- save MATLAB (-v7.3 if possible) ----
     mat_path = os.path.join(output_dir, f"{prefix}.mat")
@@ -583,6 +713,81 @@ def save_as_v73_mat(filename, data_dict):
                     grp.create_dataset(str(i), data=np.array(element))
             else:
                 f.create_dataset(key, data=value)
+
+
+def compute_background_metrics(pred_bg, gt_bg, pred_img, gt_img, bg_threshold=0.01):
+    """Quantify how much background survives into the denoised image.
+
+    Two distinct defects are measured, because they behave differently:
+
+    * ``bg_bias`` -- mean(pred_bg - gt_bg). A global offset here shifts every
+      denoised image by the same amount and is correctable post-hoc.
+    * ``leftover_in_bg`` -- mean intensity of pred_img over pixels the ground
+      truth calls empty. This is what collapses the peak-to-background contrast
+      once the 16 spatial rows are summed into a 1-D spectrum, which in turn is
+      what starves the 2-Gaussian fit.
+
+    A model can score well on the first and badly on the second.
+
+    Parameters
+    ----------
+    pred_bg, gt_bg, pred_img, gt_img : np.ndarray
+        Arrays shaped (N, H, W).
+    bg_threshold : float
+        Pixels below this fraction of each ground-truth image's peak count as
+        true background.
+
+    Returns
+    -------
+    dict of scalar summary statistics.
+    """
+    pred_bg = np.asarray(pred_bg, dtype=np.float64)
+    gt_bg = np.asarray(gt_bg, dtype=np.float64)
+    pred_img = np.asarray(pred_img, dtype=np.float64)
+    gt_img = np.asarray(gt_img, dtype=np.float64)
+
+    n = pred_bg.shape[0]
+    axes = tuple(range(1, pred_bg.ndim))
+
+    bias_per_image = np.mean(pred_bg - gt_bg, axis=axes)
+
+    leftover = np.full(n, np.nan)
+    contrast_pred = np.full(n, np.nan)
+    contrast_gt = np.full(n, np.nan)
+
+    for i in range(n):
+        gt_peak = float(np.max(gt_img[i]))
+        if not np.isfinite(gt_peak) or gt_peak <= 0:
+            continue
+
+        mask = gt_img[i] <= bg_threshold * gt_peak
+        if not mask.any():
+            continue
+
+        pred_peak = float(np.max(pred_img[i]))
+        leftover[i] = float(np.mean(pred_img[i][mask]))
+
+        if pred_peak > 0:
+            contrast_pred[i] = 1.0 - leftover[i] / pred_peak
+        contrast_gt[i] = 1.0 - float(np.mean(gt_img[i][mask])) / gt_peak
+
+    return {
+        "bg_bias": float(np.mean(bias_per_image)),
+        "bg_bias_std": float(np.std(bias_per_image)),
+        "bg_abs_bias": float(np.mean(np.abs(bias_per_image))),
+        "leftover_in_bg": float(np.nanmean(leftover)),
+        "contrast_pred": float(np.nanmean(contrast_pred)),
+        "contrast_gt": float(np.nanmean(contrast_gt)),
+        "contrast_deficit": float(np.nanmean(contrast_gt) - np.nanmean(contrast_pred)),
+        "bg_n_images": int(np.count_nonzero(~np.isnan(leftover))),
+        # Per-image distributions, kept so downstream code can run paired tests
+        # between models rather than comparing bare aggregates.
+        "per_image": {
+            "bias": bias_per_image,
+            "leftover": leftover,
+            "contrast_deficit": contrast_gt - contrast_pred,
+        },
+    }
 
 
 def get_image_wise_metrics(metrics):
@@ -794,5 +999,4 @@ def get_localization_wise_metrics(metrics):
         metrics_dict['Localization Accuracy (RMSE)'] = calculate_volumetric_rmse
 
     return metrics_dict
-
 

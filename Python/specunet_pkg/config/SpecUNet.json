@@ -106,14 +106,44 @@
         ],
         "loss_fn": "mse",
         "loss_fn_args": {
-            "tv_weight": 1e-05
+            "tv_weight": 1e-05,
+            "bg_weight": 0.0,
+            "bg_mask_threshold": 0.01
+        },
+
+        "bg_bias_correction": 0.0,
+        "bg_mask_threshold": 0.01,
+
+        "peak_fit": {
+            "fwhm_max": 250.0,
+            "maxfev": 5000,
+            "pedestal": {
+                "method": "percentile",
+                "percentile": 10.0,
+                "apply_to": "both"
+            }
         },
 
         "metrics": {
             "image_wise": ["RMSE", "PSNR", "SSIM"],
-            "localization_wise": [],
             "spectral_wise": ["Spearman rho", "Pearson r", "Centroid GT (nm)", "Centroid Raw (nm)", "Centroid % Error"],
-            "summary_output": ["mean_centroid_rawspt", "std_centroid_rawspt", "mean_centroid_spef", "std_centroid_spef"]
+            "localization_wise": ["Jaccard Index", "Localization Recall", "Localization Precision", "Localization F1-Score", "Localization Accuracy (RMSE)"],
+            "spatial_wise": ["Cramer-Rao Lower Bound", "Fourier Ring Correlation"],
+            "summary_output": [
+                "centroid_pct_err",
+                "spectral_rmse",
+                "pearson_r",
+                "spearman_rho",
+                "firstPeaks_wavelengths_abs_err",
+                "firstPeakFWHM_abs_err",
+                "secondPeaks_wavelengths_abs_err",
+                "secondPeakFWHM_abs_err",
+                "PeakRatio_abs_err",
+                "bg_rmse",
+                "psnr",
+                "ssim",
+                "contrast_deficit"
+              ]
         }
     }
 }

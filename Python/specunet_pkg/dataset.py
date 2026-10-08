@@ -5,7 +5,44 @@ from torch.utils.data import Dataset, random_split, DataLoader
 from scipy.io import loadmat
 import sys
 
-class SpecUNet_Dataset(Dataset):
+# class SA_SpecUNet_Dataset(Dataset):
+#     def __init__(self, X, Y, GTspt):
+#         self.X = X # sptimg4 (noisy spectral image)
+#         self.Y = Y # tbg4 (
+#         self.GTspt = GTspt
+#
+#     def __len__(self):
+#         return len(self.Y)
+#
+#     def __getitem__(self, idx):
+#         return (
+#             torch.tensor(self.X[idx], dtype=torch.float64),
+#             torch.tensor(self.Y[idx], dtype=torch.float64),
+#             torch.tensor(self.GTspt[idx], dtype=torch.float64)
+#         )
+
+# class SA_SpecUNet_Dataset(Dataset):
+#     def __init__(self, X, Y=None, GTspt=None):
+#         self.X = X  # noisy spectral image
+#         self.Y = Y  # target (may be None for experimental data)
+#         self.GTspt = GTspt  # ground truth (may be None)
+#
+#     def __len__(self):
+#         return len(self.X)  # Always use X to determine dataset length
+#
+#     def __getitem__(self, idx):
+#         x_tensor = torch.tensor(self.X[idx], dtype=torch.float64)
+#
+#         # For experimental data, Y and GTspt may be None
+#         if self.Y is None and self.GTspt is None:
+#             return x_tensor, None, None
+#
+#         y_tensor = torch.tensor(self.Y[idx], dtype=torch.float64) if self.Y is not None else None
+#         gt_tensor = torch.tensor(self.GTspt[idx], dtype=torch.float64) if self.GTspt is not None else None
+#
+#         return x_tensor, y_tensor, gt_tensor
+
+class SA_SpecUNet_Dataset(Dataset):
     def __init__(self, X, Y=None, GTspt=None, spt=None):
         self.X = X
         self.Y = Y
@@ -205,8 +242,8 @@ def load_matlab_data(file_path, input_shape, input_name, target_name=None, gt_na
     return sptimg4, tbg4, gt_spt, spt
 
 def create_dataset(sptimg4, tbg4=None, gt_spt=None, spt=None):
-    """Creates a SpecUNet_Dataset."""
-    return SpecUNet_Dataset(sptimg4, tbg4, gt_spt, spt)
+    """Creates a SA_SpecUNet_Dataset."""
+    return SA_SpecUNet_Dataset(sptimg4, tbg4, gt_spt, spt)
 
 def create_dataloader(dataset, opt):
     """Creates a DataLoader based on training or testing."""

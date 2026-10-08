@@ -69,12 +69,13 @@ def train(model_name, model, train_loader, val_loader, criterion, optimizer, sch
             model.train()
             training_loss = 0.0
 
-            for inputs, targets, _ in train_loader:
+            for inputs, targets, gt_img in train_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
+                gt_img = gt_img.to(device)
 
                 optimizer.zero_grad()
                 outputs = model(inputs)
-                loss = criterion(outputs, targets)
+                loss = criterion(outputs, targets, inputs, gt_img)
                 loss.backward()
                 optimizer.step()
                 training_loss += loss.item() * inputs.size(0)
@@ -86,10 +87,11 @@ def train(model_name, model, train_loader, val_loader, criterion, optimizer, sch
             val_loss = 0.0
 
             with torch.no_grad():
-                for inputs, targets, _ in val_loader:
+                for inputs, targets, gt_img in val_loader:
                     inputs, targets = inputs.to(device), targets.to(device)
+                    gt_img = gt_img.to(device)
                     outputs = model(inputs)
-                    loss = criterion(outputs, targets)
+                    loss = criterion(outputs, targets, inputs, gt_img)
                     val_loss += loss.item() * inputs.size(0)
 
             val_loss_epoch = val_loss / len(val_loader.dataset)
@@ -115,134 +117,3 @@ def train(model_name, model, train_loader, val_loader, criterion, optimizer, sch
     log_print(logger, "[train] Training complete!")
 
     return model
-
-# def train(model_name, model, train_loader, test_loader, criterion, optimizer, scheduler, logger, device, args):
-#     class MetricTracker:
-#         """
-#         Records training or validation numerical indicators over time.
-#         """
-#
-#         def __init__(self, *keys, phase='train'):
-#             self.phase = phase
-#             self._data = pd.DataFrame(index=keys, columns=['total', 'counts', 'average'])
-#             self.reset()
-#
-#         def reset(self):
-#             for col in self._data.columns:
-#                 self._data[col].values[:] = 0
-#
-#         def update(self, key, value, n=1):
-#             self._data.total[key] += value * n
-#             self._data.counts[key] += n
-#             self._data.average[key] = self._data.total[key] / self._data.counts[key]
-#
-#         def avg(self, key):
-#             return self._data.average[key]
-#
-#         def result(self):
-#             return {'{}/{}'.format(self.phase, k): v for k, v in dict(self._data.average).items()}
-#
-#     training_loss_epochs = []
-#     testing_loss_epochs = []
-#
-#     train_metrics = MetricTracker('loss', phase='train')
-#     val_metrics = MetricTracker('loss', phase='val')
-#
-#     for epoch in range(args.epochs):
-#         model.train()
-#         train_metrics.reset()
-#
-#         for inputs, targets, _ in train_loader:
-#             inputs, targets = inputs.to(device), targets.to(device)
-#
-#             optimizer.zero_grad()
-#             outputs = model(inputs)
-#             loss = criterion(outputs, targets)
-#             loss.backward()
-#             optimizer.step()
-#
-#             train_metrics.update('loss', loss.item(), n=inputs.size(0))
-#
-#         train_result = train_metrics.result()
-#         training_loss_epoch = train_result['train/loss']
-#         log_print(logger, f"Epoch [{epoch + 1}/{args.epochs}], Training Loss: {training_loss_epoch:.6f}")
-#
-#         model.eval()
-#         val_metrics.reset()
-#
-#         with torch.no_grad():
-#             for inputs, targets, _ in test_loader:
-#                 inputs, targets = inputs.to(device), targets.to(device)
-#                 outputs = model(inputs)
-#                 loss = criterion(outputs, targets)
-#
-#                 val_metrics.update('loss', loss.item(), n=inputs.size(0))
-#
-#         val_result = val_metrics.result()
-#         testing_loss_epoch = val_result['val/loss']
-#         log_print(logger, f"Epoch [{epoch + 1}/{args.epochs}], Testing Loss: {testing_loss_epoch:.6f}")
-#
-#         model.train()
-#         scheduler.step()
-#
-#         training_loss_epochs.append(training_loss_epoch)
-#         testing_loss_epochs.append(testing_loss_epoch)
-#
-#     save_loss_graphs(model_name, training_loss_epochs, testing_loss_epochs, args.epochs, logger)
-#     save_model(model_name, model, args.input_size, logger)
-#
-#     log_print(logger, "Training complete!")
-#
-#     return model
-
-# def train(model_name, model, train_loader, test_loader, criterion, optimizer, scheduler, logger, device, args):
-#
-#     training_loss_epochs = []
-#     testing_loss_epochs = []
-#
-#     # Training loop
-#     for epoch in range(args.epochs):
-#         model.train()
-#         training_loss = 0.0
-#
-#         for inputs, targets, _ in train_loader:
-#             inputs, targets = inputs.to(device), targets.to(device)
-#
-#             optimizer.zero_grad()
-#             outputs = model(inputs)
-#             loss = criterion(outputs, targets)
-#             loss.backward()
-#             optimizer.step()
-#
-#             training_loss += loss.item() * inputs.size(0)
-#
-#         training_loss_epoch = training_loss / len(train_loader.dataset)
-#
-#         log_print(logger, f"Epoch [{epoch + 1}/{args.epochs}], Training Loss: {training_loss_epoch}")
-#
-#         model.eval()
-#         testing_loss = 0.0
-#
-#         with torch.no_grad():
-#             for inputs, targets, _ in test_loader:
-#                 inputs, targets = inputs.to(device), targets.to(device)
-#                 outputs = model(inputs)
-#                 loss = criterion(outputs, targets)
-#                 testing_loss += loss.item() * inputs.size(0)
-#
-#         testing_loss_epoch = testing_loss / len(test_loader.dataset)
-#         log_print(logger,f"Epoch [{epoch + 1}/{args.epochs}], Testing Loss: {testing_loss_epoch}")
-#
-#         model.train()
-#         scheduler.step()
-#
-#         training_loss_epochs.append(training_loss_epoch)
-#         testing_loss_epochs.append(testing_loss_epoch)
-#
-#     save_loss_graphs(model_name, training_loss_epochs, testing_loss_epochs, args.epochs, logger)
-#
-#     save_model(model_name, model, args.input_size, logger)
-#
-#     log_print(logger, "Training complete!")
-#
-#     return model
