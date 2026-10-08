@@ -3,90 +3,69 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class UNet(nn.Module):
-    def __init__(self, input_channels, num_layers, num_first_filters):
-        super(UNet, self).__init__()
+    """PyTorch port of the published SpecUNet architecture
+    (setNetworkMaxpooling.m). With F = num_first_filters, L = num_layers:
+
+      encoder i   Conv3x3(F*2^(i-1)) -> BN -> ReLU -> MaxPool2
+                  (skip is taken from the ReLU, before pooling)
+      bottleneck  Conv3x3(F*2^L) -> ReLU -> Conv3x3(F*2^L) -> ReLU
+                  (bottleneck_bn=True inserts BN after each conv)
+      decoder i   ConvT2x2/2(F*2^(L-i)) -> ReLU -> Conv3x3 -> ReLU
+                  -> concat[decoder, skip]
+                  (no channel reduction: the concatenated tensor feeds the
+                  next transposed conv, or the final 1x1 conv, directly)
+      output      Conv1x1(1) -> ReLU
+    """
+
+    def __init__(self, input_channels, num_layers, num_first_filters, bottleneck_bn=False):
+        super().__init__()
 
         self.encoder = nn.ModuleList()
-        self.decoder = nn.ModuleList()
-        self.channel_reducers = nn.ModuleList()
-
-        num_filters = num_first_filters
-        encoder_filters = []
-
-        # Contractive path
-        for i in range(num_layers):
-            layers = [
-                nn.Conv2d(input_channels, num_filters, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(num_filters),
-                nn.ReLU(inplace=True)
-            ]
-            if i > 0:  # MaxPooling from the second layer onwards
-                layers.insert(0, nn.MaxPool2d(kernel_size=2, stride=2))
-            self.encoder.append(nn.Sequential(*layers))
-            encoder_filters.append(num_filters)
-            input_channels = num_filters
-            num_filters *= 2
-
-        # Bottleneck
-        bottleneck_channels = num_filters // 2
-        self.bottleneck = nn.Sequential(
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(bottleneck_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(bottleneck_channels),
-            nn.ReLU(inplace=True),
-        )
-
-        # Expansive path
-        for i in range(num_layers):
-            num_filters //= 2
-            self.decoder.append(nn.Sequential(
-                nn.ConvTranspose2d(bottleneck_channels, num_filters, kernel_size=2, stride=2),
-                nn.ReLU(inplace=True)
+        f, in_ch, enc_ch = num_first_filters, input_channels, []
+        for _ in range(num_layers):
+            self.encoder.append(nn.Sequential(
+                nn.Conv2d(in_ch, f, 3, padding=1),
+                nn.BatchNorm2d(f),
+                nn.ReLU(inplace=True),
             ))
-            bottleneck_channels = num_filters
-            # Channel reducer after concatenation of encoder and decoder outputs
-            self.channel_reducers.append(
-                nn.Conv2d(encoder_filters[-(i + 1)] + num_filters, num_filters, kernel_size=1)
-            )
+            enc_ch.append(f)
+            in_ch, f = f, f * 2
+        self.pool = nn.MaxPool2d(2, 2)
 
-        # Final Convolutional Layer
+        # After the loop f = F * 2^L, so the bottleneck is twice as wide as
+        # the deepest encoder level, as in the published network.
+        def bconv(i, o):
+            layers = [nn.Conv2d(i, o, 3, padding=1)]
+            if bottleneck_bn:
+                layers.append(nn.BatchNorm2d(o))
+            layers.append(nn.ReLU(inplace=True))
+            return layers
+        self.bottleneck = nn.Sequential(*bconv(in_ch, f), *bconv(f, f))
+
+        self.decoder = nn.ModuleList()
+        ch = f
+        for i in range(num_layers):
+            f //= 2
+            self.decoder.append(nn.Sequential(
+                nn.ConvTranspose2d(ch, f, 2, stride=2),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(f, f, 3, padding=1),
+                nn.ReLU(inplace=True),
+            ))
+            ch = f + enc_ch[-(i + 1)]          # channels after concatenation
+
         self.final_conv = nn.Sequential(
-            nn.Conv2d(num_first_filters, 1, kernel_size=1),
-            nn.ReLU(inplace=True)
+            nn.Conv2d(ch, 1, 1),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
-        enc_outputs = []
-
-        # Encoder path
-        for layer in self.encoder:
-            x = layer(x)
-            enc_outputs.append(x)
-
-        # Bottleneck
+        skips = []
+        for enc in self.encoder:
+            x = enc(x)
+            skips.append(x)
+            x = self.pool(x)
         x = self.bottleneck(x)
-
-        # Decoder path
-        for i, layer in enumerate(self.decoder):
-            # Upsample decoder output
-            x = layer(x)
-
-            # Get the corresponding encoder output
-            enc_output = enc_outputs[-(i + 1)]
-
-            # Resize decoder output to match encoder dimensions
-            x = F.interpolate(x, size=enc_output.shape[2:], mode='bilinear', align_corners=False)
-
-            # Concatenate encoder and decoder outputs
-            x = torch.cat((enc_output, x), dim=1)
-
-            # Reduce channels after concatenation
-            x = self.channel_reducers[i](x)
-
-        # Final Convolutional Layer
-        x = self.final_conv(x)
-
-        return x
+        for dec, skip in zip(self.decoder, reversed(skips)):
+            x = torch.cat([dec(x), skip], dim=1)     # [decoder, skip]
+        return self.final_conv(x)
